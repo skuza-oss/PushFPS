@@ -38,6 +38,8 @@ Item {
     }
 
     Component.onCompleted: {
+        // Only lab runs pass --pushlab; without it no file request is made (Qt logs local reads as errors).
+        if (Qt.application.arguments.indexOf("--pushlab") < 0) return
         const xhr = new XMLHttpRequest()
         xhr.onreadystatechange = function() {
             if (xhr.readyState !== XMLHttpRequest.DONE) return

@@ -21,7 +21,12 @@ param(
     [int]$StatsMs = 15000,
     [int]$LatencyTries = 12,
     [int]$QualitySeconds = 8,
-    [int]$TimeoutSec = 300
+    [int]$TimeoutSec = 300,
+    [switch]$FrameLog,
+    # 0 = leave as saved; 1 = frame generation off; 2..4 = multiplier
+    [int]$FgMultiplier = 0,
+    # extra environment variables for PushFPS (e.g. @{PUSHFPS_PACKET_DEDUP_BIAS='0.8'})
+    [hashtable]$Env = @{}
 )
 $ErrorActionPreference = 'Stop'
 $lab = 'F:\Games\PS5\PushFPS-lab'
@@ -44,6 +49,11 @@ $iniBefore = [IO.File]::ReadAllText($ini)
 & $profileTool -Path $dat -Fps $Fps -Write | Out-Null
 [IO.File]::WriteAllText($ini, ($iniBefore -replace '(?m)^DecodeMode=\d', "DecodeMode=$DecodeMode"))
 
+# Every trial starts from the same lab settings: snapshot now, put back after the run.
+$snapshot = "$data.trial-snapshot"
+if (Test-Path $snapshot) { Remove-Item $data -Recurse -Force; Move-Item $snapshot $data }   # an interrupted earlier trial
+Copy-Item $data $snapshot -Recurse
+
 $prefPath = "$data\qml-preferences.v1.json"
 $prefs = [IO.File]::ReadAllText($prefPath) | ConvertFrom-Json
 foreach ($k in $Pref.Keys) {
@@ -65,6 +75,12 @@ if ($Session.Count) {
     if ($Session.ContainsKey(2)) { $text = [regex]::Replace($text, '(\\"list\\" \\"\\" 0 0 15 \d+ )\d', "`${1}$($Session[2])") }
     [IO.File]::WriteAllText($sessionFile, $text)
 }
+if ($FgMultiplier -gt 0) {
+    # list entry: name note kind builtin contents MULT backend audioSync audioOffset nodeCount mode CHAINMULT ...
+    $text = [IO.File]::ReadAllText($sessionFile)
+    $text = [regex]::Replace($text, '(\\"list\\" \\"\\" 0 0 \d+ )\d+( \d+ \d+ -?\d+ \d+ \d+ )\d+', "`${1}$FgMultiplier`${2}$FgMultiplier")
+    [IO.File]::WriteAllText($sessionFile, $text)
+}
 $sessionLine = ((Get-Content $sessionFile -TotalCount 3)[2] -split ' ')[0..12] -join ' '
 
 # ---- run ----
@@ -72,6 +88,9 @@ $cfg = @{ run = $Name; warmupMs = $WarmupMs; statsMs = $StatsMs; latencyTries = 
 [IO.File]::WriteAllText("$lab\pushlab.json", ($cfg | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
 $startBytes = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }
 $env:QML_XHR_ALLOW_FILE_READ = '1'
+$env:VEYRA_VERBOSE_FRAME_LOGS = if ($FrameLog) { '1' } else { '' }
+foreach ($k in @('PUSHFPS_PACKET_DEDUP', 'PUSHFPS_PACKET_DEDUP_SHARE', 'PUSHFPS_PACKET_DEDUP_BIAS')) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+foreach ($k in $Env.Keys) { Set-Item "env:$k" ([string]$Env[$k]) }
 $proc = Start-Process "$lab\PushFPS.exe" -WorkingDirectory $lab -PassThru
 $timedOut = -not $proc.WaitForExit($TimeoutSec * 1000)
 if ($timedOut) { Stop-Process -Id $proc.Id -Force; Start-Sleep 2 }
@@ -80,6 +99,7 @@ Remove-Item "$lab\pushlab.json" -Force -ErrorAction SilentlyContinue
 # ---- restore shared stream settings ----
 & $profileTool -Path $dat -Fps $fpsBefore -Write | Out-Null
 [IO.File]::WriteAllText($ini, $iniBefore)
+Remove-Item $data -Recurse -Force; Move-Item $snapshot $data
 
 # ---- read this run's log ----
 $s = [IO.File]::Open($log, 'Open', 'Read', 'ReadWrite'); $s.Seek($startBytes, 'Begin') | Out-Null
@@ -109,8 +129,19 @@ if ($statsBegin -and $statsEnd) {
             }
         }
     }
+    $metrics['fgValidityLines'] = @($window | Where-Object { $_ -match '\[fg-validity\]' }).Count
     $xg = @($window | Where-Object { $_ -match '\[xess-fg\] presentId' } | ForEach-Object { if ($_ -match 'generatedTotal=(\d+)') { [double]$matches[1] } })
     if ($xg.Count -ge 2) { $metrics['xessGeneratedPerSec'] = [math]::Round(($xg[-1] - $xg[0]) / (((Stamp ($window | Where-Object { $_ -match '\[xess-fg\] presentId' } | Select-Object -Last 1)) - (Stamp ($window | Where-Object { $_ -match '\[xess-fg\] presentId' } | Select-Object -First 1))).TotalSeconds), 1) }
+}
+if ($FrameLog) {
+    $frames = foreach ($l in $lines) {
+        if ($l -match 'content-dedup-frame\] source=(\d+) pts100ns=(\d+) keep=(\w+) reason=(\S+) picture=(\S+) withinBand=(\w+) over=(\d+) maxDiff=(\d+)') {
+            $o = [ordered]@{ src = $matches[1]; pts = $matches[2]; keep = $matches[3]; reason = $matches[4]; picture = $matches[5]; band = $matches[6]; over = $matches[7]; max = $matches[8]; bytes = ''; packetRepeat = ''; threshold = '' }
+            if ($l -match 'bytes=(\d+) packetRepeat=(\w+) packetThreshold=(\d+)') { $o.bytes = $matches[1]; $o.packetRepeat = $matches[2]; $o.threshold = $matches[3] }
+            [pscustomobject]$o
+        }
+    }
+    $frames | Export-Csv "$results\$Name-frames.csv" -NoTypeInformation
 }
 function LabJson($prefix) { $l = $lines | Where-Object { $_ -match "\[push-lab\] $prefix " } | Select-Object -Last 1; if ($l) { $l.Substring($l.IndexOf("] $prefix ") + $prefix.Length + 3) | ConvertFrom-Json } }
 $latency = LabJson 'latency'; $quality = LabJson 'quality'; $done = LabJson 'done'
@@ -130,6 +161,7 @@ $row = [pscustomobject]@{
     name = $Name; at = $result.at; ok = $done.ok; fps = $Fps; decode = $DecodeMode; session = $sessionLine
     procP95 = $m['callbackToPresentReturnP95Ms'].median; gpuP95 = $m['gpuReadyP95Ms'].median
     keptPerSec = $m['kept'].median; repeatsPerSec = $m['repeats'].median; blindPerSec = $m['blind'].median
+    fgLines = $m['fgValidityLines']; xessGenPerSec = $m['xessGeneratedPerSec']
     latMedian = $latency.medianMs; latMin = $latency.minMs; latMax = $latency.maxMs; answered = "$($latency.answered)/$($latency.trials)"
     psnr = $quality.psnr; gainOverBlend = $quality.gainOverBlend; onTime = $quality.onTime; qScore = $quality.score
 }
