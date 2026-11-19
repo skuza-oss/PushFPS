@@ -91,7 +91,7 @@ $env:QML_XHR_ALLOW_FILE_READ = '1'
 $env:VEYRA_VERBOSE_FRAME_LOGS = if ($FrameLog) { '1' } else { '' }
 foreach ($k in @('PUSHFPS_PACKET_DEDUP', 'PUSHFPS_PACKET_DEDUP_SHARE', 'PUSHFPS_PACKET_DEDUP_BIAS')) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
 foreach ($k in $Env.Keys) { Set-Item "env:$k" ([string]$Env[$k]) }
-$proc = Start-Process "$lab\PushFPS.exe" -WorkingDirectory $lab -PassThru
+$proc = Start-Process "$lab\PushFPS.exe" -ArgumentList '--pushlab' -WorkingDirectory $lab -PassThru
 $timedOut = -not $proc.WaitForExit($TimeoutSec * 1000)
 if ($timedOut) { Stop-Process -Id $proc.Id -Force; Start-Sleep 2 }
 Remove-Item "$lab\pushlab.json" -Force -ErrorAction SilentlyContinue
