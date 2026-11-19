@@ -228,6 +228,8 @@ struct FramePacket {
     uint64_t sourceEpoch = 1;     // ResetCoordinator epoch at frame boundary
     int64_t arrivalHost100ns = 0; // capture callback steady_clock; 0 when unavailable
     int64_t decodedHost100ns = 0; // actual remote decoder output; same local clock
+    uint32_t payloadBytes = 0;    // compressed picture size of a network stream sample (0: unknown);
+                                  // PacketPictureClassifier tells repeats from it when the picture stays on the GPU
 
     GpuTextureHandle color;       // canonical linear RGBA16F working texture
     HardwareSurfaceInput hardwareSurface; // decoded NV12/P010 surface when the

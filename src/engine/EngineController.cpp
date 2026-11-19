@@ -25,6 +25,7 @@
 #include "veyra/engine/RealtimePreviewScheduling.h"
 #include "veyra/engine/CaptureHalfRate.h"
 #include "veyra/engine/ContentDedup.h"
+#include "veyra/engine/PacketPictureClassifier.h"
 #include "veyra/engine/CapturePreviewClock.h"
 #include "veyra/engine/DisplayFgBudget.h"
 #include "veyra/engine/PushAdaptiveFg.h"
@@ -1168,7 +1169,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
             // first copies of a 30 fps game (CaptureHalfRate.h).
             // VEYRA_TEST_CONTENT_DEDUP_LEGACY=1 restores the report-only content modes
             // for A/B runs.
-            ContentDedup contentDedup;uint64_t dedupRevision=0;
+            ContentDedup contentDedup;uint64_t dedupRevision=0;PacketPictureClassifier packetPictures;PacketPictureClassifier::Result packetPicture;
             // PushFPS Frame Pacing Repair (PushPacingRepair.h): even times for the kept frames
             // of a locked game whose frames the console shows unevenly.
             PushPacingRepair pacingRepair;int64_t pacingLastPts=0;bool pacingHaveLast=false;int64_t nextPacingLog=0;
@@ -2246,7 +2247,15 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     const auto interval=capturePeriod;
                     pipeline::PictureReference::Result picture;
                     const auto compareStart=Clock::now();
-                    const bool pictured=pipeline::captureFramePicture(frame,enginePictures,gd.packedInput==6||gd.packedInput==7,picture);
+                    bool pictured=pipeline::captureFramePicture(frame,enginePictures,gd.packedInput==6||gd.packedInput==7,picture);
+                    // PushFPS: a hardware-decoded network stream has no CPU picture; its compressed sample size
+                    // tells a repeated picture from a new one (PacketPictureClassifier.h). The size is always
+                    // classified (also on CPU pictures) so the frame log can compare both.
+                    packetPicture={};
+                    if(pkt.payloadBytes>0&&packetPictures.enabled()){
+                        packetPicture=packetPictures.observe(pkt.payloadBytes,cadenceBoundary||dedupRevision!=options.settings.revision);
+                        if(!pictured){picture={};picture.id=packetPicture.picture|(uint64_t(0x50)<<56);picture.repeat=packetPicture.repeat;pictured=true;}
+                    }
                     if(pictured&&picture.repeat){dedupRepeatMax8=std::max(dedupRepeatMax8,picture.max8);dedupRepeatMaxOver=std::max(dedupRepeatMaxOver,picture.over);}
                     else if(pictured&&picture.over)dedupNewMinOver=std::min(dedupNewMinOver,picture.over);
                     const bool boundary=cadenceBoundary||dedupRevision!=options.settings.revision;
@@ -2257,8 +2266,8 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     const auto pictureSequence=capturedPicture&&capturedPicture->pictureValid?pkt.sequence:0;
                     const auto decision=contentDedup.observe(pictured?&picture.id:nullptr,pkt.pts.to100ns(),interval,boundary,hint,pictureSequence);
                     const double dedupUs=elapsedMs(compareStart)*1000;
-                    if(veyra::log::verboseFrameLogs())veyra::log::info("content-dedup-frame",std::format("source={} pts100ns={} keep={} reason={} picture={:x} withinBand={} over={} maxDiff={} contentPts100ns={} intervalMs={:.3f} cpuUs={:.1f}",
-                        pkt.sequence,pkt.pts.to100ns(),decision.keep,decision.reason,pictured?picture.id:0,picture.repeat,picture.over,picture.max8,decision.contentPts,decision.interval/1e4,dedupUs));
+                    if(veyra::log::verboseFrameLogs())veyra::log::info("content-dedup-frame",std::format("source={} pts100ns={} keep={} reason={} picture={:x} withinBand={} over={} maxDiff={} contentPts100ns={} intervalMs={:.3f} cpuUs={:.1f} bytes={} packetRepeat={} packetThreshold={:.0f}",
+                        pkt.sequence,pkt.pts.to100ns(),decision.keep,decision.reason,pictured?picture.id:0,picture.repeat,picture.over,picture.max8,decision.contentPts,decision.interval/1e4,dedupUs,pkt.payloadBytes,packetPicture.repeat,packetPicture.threshold));
                     if(!decision.keep){std::lock_guard lock(mutex_);++snapshot_.captureRateSkipped;continue;}
                     dedupHoldInterval100ns=decision.holdInterval;
                     int64_t contentPts=decision.contentPts,contentInterval=decision.interval;

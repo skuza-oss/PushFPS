@@ -246,6 +246,7 @@ pipeline::FramePacket RemotePlaySource::makePacket(const remoteplay::VideoSample
     packet.sourceKind = pipeline::SourceKind::RemotePlay;
     packet.sourceEpoch = epoch;
     packet.arrivalHost100ns = sample.arrival100ns;
+    packet.payloadBytes = static_cast<std::uint32_t>(std::min<std::size_t>(sample.payload.size(), UINT32_MAX));
     const auto stamp = clock_.video(sourceIndex, sample.arrival100ns);
     if (stamp) {
         if(sourceIndex%600==0)veyra::log::info("remoteplay-clock",std::format("wireIndex={} ptsMs={:.3f} arrivalMinusPtsMs={:.3f} nominalFps={} (arrival-disciplined local estimate, not PS5 native PTS)",sourceIndex,double(stamp->pts100ns)/10000,double(sample.arrival100ns-static_cast<int64_t>(origin100ns_)-stamp->pts100ns)/10000,info_.averageFps));
