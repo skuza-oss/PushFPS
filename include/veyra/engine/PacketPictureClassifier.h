@@ -26,9 +26,10 @@ public:
     struct Result { uint64_t picture = 0; bool repeat = false; double threshold = 0; };
 
     PacketPictureClassifier() {
-        if (const char* v = std::getenv("PUSHFPS_PACKET_DEDUP")) enabled_ = !(v[0] == '0' && v[1] == 0);
-        if (const char* v = std::getenv("PUSHFPS_PACKET_DEDUP_SHARE")) { const double x = std::atof(v); if (x > 0.01 && x < 0.95) share_ = x; }
-        if (const char* v = std::getenv("PUSHFPS_PACKET_DEDUP_BIAS")) { const double x = std::atof(v); if (x > 0.1 && x < 10) bias_ = x; }
+        char v[32];
+        if (env("PUSHFPS_PACKET_DEDUP", v)) enabled_ = !(v[0] == '0' && v[1] == 0);
+        if (env("PUSHFPS_PACKET_DEDUP_SHARE", v)) { const double x = std::atof(v); if (x > 0.01 && x < 0.95) share_ = x; }
+        if (env("PUSHFPS_PACKET_DEDUP_BIAS", v)) { const double x = std::atof(v); if (x > 0.1 && x < 10) bias_ = x; }
     }
     bool enabled() const { return enabled_; }
     void reset() { haveNew_ = haveRepeat_ = false; last_ = 0; }
@@ -60,6 +61,21 @@ public:
     }
 
 private:
+    static bool env(const char* name, char (&out)[32]) {
+#ifdef _MSC_VER
+        char* value = nullptr; size_t length = 0;
+        if (_dupenv_s(&value, &length, name) != 0 || !value) return false;
+        const bool ok = value[0] != 0;
+        size_t i = 0; for (; i + 1 < sizeof(out) && value[i]; ++i) out[i] = value[i];
+        out[i] = 0; std::free(value);
+        return ok;
+#else
+        const char* value = std::getenv(name);
+        if (!value || !value[0]) return false;
+        size_t i = 0; for (; i + 1 < sizeof(out) && value[i]; ++i) out[i] = value[i];
+        out[i] = 0; return true;
+#endif
+    }
     static constexpr double kRate = 0.05;
     bool enabled_ = true, haveNew_ = false, haveRepeat_ = false;
     double share_ = 0.25, bias_ = 1.0, logNew_ = 0, logRepeat_ = 0;
