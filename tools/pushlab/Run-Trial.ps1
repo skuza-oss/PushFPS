@@ -102,8 +102,15 @@ Remove-Item "$lab\pushlab.json" -Force -ErrorAction SilentlyContinue
 Remove-Item $data -Recurse -Force; Move-Item $snapshot $data
 
 # ---- read this run's log ----
-$s = [IO.File]::Open($log, 'Open', 'Read', 'ReadWrite'); $s.Seek($startBytes, 'Begin') | Out-Null
-$r = New-Object IO.StreamReader($s); $text = $r.ReadToEnd(); $r.Close()
+function ReadFrom($path, $offset) {
+    $s = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite'); $s.Seek($offset, 'Begin') | Out-Null
+    $r = New-Object IO.StreamReader($s); $t = $r.ReadToEnd(); $r.Close(); $t
+}
+# PushFPS rotates veyra-qml.log into veyra-qml.old.log when it grows large (frame logs): then this run starts
+# in the old file at $startBytes and continues at the start of the new one.
+$oldLog = $log -replace '\.log$', '.old.log'
+$rotated = (Get-Item $log).Length -lt $startBytes -or ((Test-Path $oldLog) -and (Get-Item $oldLog).LastWriteTime -gt $proc.StartTime)
+$text = if ($rotated -and (Test-Path $oldLog) -and (Get-Item $oldLog).Length -ge $startBytes) { (ReadFrom $oldLog $startBytes) + (ReadFrom $log 0) } else { ReadFrom $log $(if ($rotated) { 0 } else { $startBytes }) }
 $lines = $text -split "`n"
 function Stamp($line) { [datetimeoffset]::Parse($line.Substring(0, 24)) }
 $phaseLines = $lines | Where-Object { $_ -match '\[push-lab\] phase=' }
