@@ -1069,6 +1069,8 @@ Window {
         }
         function onPageChanged() { if (introLoader.item && root.page !== "home") introLoader.item.dismiss() }
     }
+    // PushFPS lab: unattended measurement runs; inert without a pushlab.json (see PushLab.qml).
+    PushLab { showPlayback: function() { if (root.page === "home") root.goPage("min") } }
     Component.onCompleted: {
         if (root.test.noUpdateCheck !== true) veyra.updates.startAutomaticCheck()
         // --lang <code>: screenshots in another language (saved in that run's own --data-dir).

@@ -108,3 +108,4 @@ PushLayoutDialog 1.0 PushLayoutDialog.qml
 PushFrameInputDialog 1.0 PushFrameInputDialog.qml
 PushQualityTestDialog 1.0 PushQualityTestDialog.qml
 PushLatencyTestDialog 1.0 PushLatencyTestDialog.qml
+PushLab 1.0 PushLab.qml
