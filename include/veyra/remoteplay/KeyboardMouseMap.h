@@ -69,7 +69,7 @@ public:
             ";          DpadUp DpadDown DpadLeft DpadRight LeftUp LeftDown LeftLeft LeftRight\n"
             ";          RightUp RightDown RightLeft RightRight Walk None\n"
             "; Keys: A-Z 0-9 F1-F24 Space Enter Esc Tab Backspace CapsLock LShift RShift LCtrl RCtrl LAlt RAlt\n"
-            ";       Up Down Left Right Insert Delete Home End PageUp PageDown Num0-Num9 Grave Minus Equals\n"
+            ";       Up Down Left Right Insert Delete End PageUp PageDown Num0-Num9 Grave Minus Equals\n"
             ";       LBracket RBracket Semicolon Quote Comma Period Slash Backslash\n"
             ";       Mouse1 (left) Mouse2 (right) Mouse3 (middle) Mouse4 Mouse5 WheelUp WheelDown\n"
             "; (F12 and Home are reserved.) The defaults follow GTA V's PlayStation layout.\n"
@@ -144,7 +144,7 @@ public:
         if (notches > 0) wheelUpUntil_ = nowMs + settings_.wheelPulseMs;
         if (notches < 0) wheelDownUntil_ = nowMs + settings_.wheelPulseMs;
     }
-    void releaseAll() { down_.fill(false); dx_ = dy_ = 0; vx_ = vy_ = 0; wheelUpUntil_ = wheelDownUntil_ = 0; lastPollMs_ = -1; }
+    void releaseAll() { down_.fill(false); dx_ = dy_ = idlePolls_ = 0; vx_ = vy_ = 0; wheelUpUntil_ = wheelDownUntil_ = 0; lastPollMs_ = -1; }
 
     // One controller state from everything since the previous call.
     ControllerState poll(double nowMs) {
