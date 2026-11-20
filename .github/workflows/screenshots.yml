@@ -162,7 +162,21 @@ jobs:
             # The crash notice: the note the crash handler would have left, written before the start.
             @{ name = '75-crash-notice'; crash = $true; args = @('--page', 'home', '--lang', 'en', '--pref', 'pushSunset=false') },
             @{ name = '76-card-test'; args = @('--page', 'home', '--dialog', 'cardtest', '--lang', 'en', '--pref', 'pushSunset=false') },
-            @{ name = '77-settings-card-test'; args = @('--page', 'set', '--tab', 'about', '--scroll-to', 'set-cardtest', '--lang', 'en', '--pref', 'pushSunset=false') }
+            @{ name = '77-settings-card-test'; args = @('--page', 'set', '--tab', 'about', '--scroll-to', 'set-cardtest', '--lang', 'en', '--pref', 'pushSunset=false') },
+            # Comparison clips (3.2.5): the Reveal layout with its sweep interval, and the clip quality of a split clip.
+            @{ name = '78-compare-reveal'; args = @('--page', 'home', '--dialog', 'compare', '--lang', 'en', '--pref', 'pushCompareLayout=3', '--pref', 'pushSunset=false') },
+            @{ name = '79-compare-split-quality'; args = @('--page', 'home', '--dialog', 'compare', '--lang', 'en', '--pref', 'pushCompareLayout=0', '--pref', 'pushCompareQuality=2160', '--pref', 'pushSunset=false') },
+            @{ name = '80-settings-performance-report'; args = @('--page', 'set', '--tab', 'about', '--scroll-to', 'set-perfreport', '--lang', 'en', '--pref', 'pushSunset=false') },
+            # Crop and resize of the console picture (3.2.6). 81: the test pattern with a fifth cut from the left and the right and a
+            # tenth from the top (the kept part centred, the rest black); 82: the same picture whole, to compare; 83: the editor;
+            # 84: the quick setup row. Look at the kept part's first and last columns and rows: they must show the picture and
+            # nothing else (an edge through a 2 x 2 pixel block once left stray pixels there).
+            @{ name = '81-crop-playing'; sender = $true; size = '1280x720'; args = @('frameinput:default', '--page', 'min', '--pref', 'pushCropOn=true', '--pref', 'pushCropL=200', '--pref', 'pushCropR=200', '--pref', 'pushCropT=100', '--pref', 'pushSunset=false') },
+            @{ name = '82-crop-off-playing'; sender = $true; size = '1280x720'; args = @('frameinput:default', '--page', 'min', '--pref', 'pushCropOn=false', '--pref', 'pushCropL=200', '--pref', 'pushCropR=200', '--pref', 'pushCropT=100', '--pref', 'pushSunset=false') },
+            # 85: a smaller picture moved off centre with odd shares cut, so all four edges of the kept part lie inside the window.
+            @{ name = '85-crop-small-playing'; sender = $true; size = '1280x720'; args = @('frameinput:default', '--page', 'min', '--pref', 'pushCropOn=true', '--pref', 'pushCropL=131', '--pref', 'pushCropT=73', '--pref', 'pushCropB=41', '--pref', 'pushCropZoom=77', '--pref', 'pushCropX=-83', '--pref', 'pushCropY=37', '--pref', 'pushSunset=false') },
+            @{ name = '83-crop-editor'; args = @('--page', 'home', '--dialog', 'crop', '--lang', 'en', '--pref', 'pushCropOn=true', '--pref', 'pushCropT=119', '--pref', 'pushCropB=119', '--pref', 'pushSunset=false') },
+            @{ name = '84-crop-quick-setup'; args = @('--page', 'home', '--scroll-to', 'pushfps-crop-row', '--lang', 'en', '--pref', 'pushCropOn=true', '--pref', 'pushCropT=119', '--pref', 'pushCropB=119', '--pref', 'pushSunset=false') }
           )
           if ($env:ONLY) { $list = @($list | Where-Object { $_.name -match $env:ONLY }); Write-Host "Only: $($list.name -join ', ')" }
           foreach ($s in $list) {
@@ -185,7 +199,16 @@ jobs:
             Start-Sleep -Seconds $(if ($s.sender) { 20 } else { 14 })
             $p.Refresh()
             $hwnd = $p.MainWindowHandle
-            if ($p.HasExited -or $hwnd -eq [IntPtr]::Zero) { Write-Host "::warning::$($s.name): no window"; if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }; continue }
+            if ($p.HasExited -or $hwnd -eq [IntPtr]::Zero) {
+              Write-Host "::warning::$($s.name): no window"
+              # Why: whether the program is gone, the failure note its crash handler leaves, and what its log last said.
+              Write-Host "exited=$($p.HasExited) code=$(if ($p.HasExited) { '0x{0:X8}' -f $p.ExitCode } else { 'still running' })"
+              if (Test-Path D:\pf\logs\veyra-last-failure.txt) { Get-Content D:\pf\logs\veyra-last-failure.txt -Encoding Unicode | Out-Host }
+              Get-ChildItem D:\pf\logs -Filter *.log -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1 | Get-Content -Tail 45 | Out-Host
+              if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+              if ($sender -and -not $sender.HasExited) { Stop-Process -Id $sender.Id -Force }
+              continue
+            }
             [W]::SetForegroundWindow($hwnd) | Out-Null; Start-Sleep -Milliseconds 800
             $r = New-Object W+RECT; [W]::GetWindowRect($hwnd, [ref]$r) | Out-Null
             $bw = $r.R - $r.L; $bh = $r.B - $r.T

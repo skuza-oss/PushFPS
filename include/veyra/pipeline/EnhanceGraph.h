@@ -149,6 +149,16 @@ struct EnhanceGraphDesc {
     uint32_t fgMultiplier=2;
     engine::FrameGenerationBackend frameGenerationBackend=engine::FrameGenerationBackend::Dlss;
     uint32_t vfgQuality=1;
+    // PushFlow only: the motion size chosen apart from the tier (0 = the tier's own; pushflow/PushFlowMotion.h).
+    // The engine rebuilds the graph when it changes.
+    int pushFlowMotion=0;
+    // PushFlow only: PushFlow 2's encoder cache is asked for (pushflow/PushFlow2.h; off unless a user turned it on).
+    bool pushFlowEncoderCache=false;
+    // PushFlow only: PushFlow 2's Guard is asked for (the same rules).
+    bool pushFlowGuard=false;
+    // PushFlow only: PushFlow 2's Predict is asked for (the same rules; live sources only, set by the
+    // engine's stage request). The batch then holds the real frame first and forecasts after it.
+    bool pushFlowPredict=false;
     bool vfgAsyncSubmission=false; // preview-only; export retains synchronous SDK verdicts
     bool vfgAutoRegulate=false;
     bool vfgFastFallback=false; // live 2X with vfgAutoRegulate: also load the next faster VFG model
@@ -593,6 +603,8 @@ public:
         FrameBatch batch;
         uint32_t fgCandidates=0,fgEvaluated=0,fgSkippedBeforeEval=0,fgSkippedForReset=0;
         bool historyReset=false,fgRecovery=false,fgBudgetSeed=false,fgReduced=false,fgFast=false,fgFastForBudget=false;
+        // PushFlow 2's Predict made this batch: the real frame is first, the generated frames are forecasts after it.
+        bool fgPredict=false;
         ResetReason detectedReset=ResetReason::None;
         int measuredContentRate=0;
         double ptsMs = 0.0;
@@ -739,8 +751,22 @@ public:
     bool amfFrcEnabled() const { return desc_.enableFg && !desc_.noFeatures && !desc_.stillImage && desc_.frameGenerationBackend==engine::FrameGenerationBackend::AmdFrc; }
     bool pushFlowEnabled() const { return desc_.enableFg && !desc_.noFeatures && !desc_.stillImage && desc_.frameGenerationBackend==engine::FrameGenerationBackend::PushFlow; }
     bool pushFlowActive() const;
+    // PushFlow 2's Predict is in use: batches hold the real frame first and forecasts after it, so the
+    // real frame needs no frame interval of delay before it is shown.
+    bool pushFlowPredicting() const;
+    // Predict steps aside for the pairs that follow (in-between frames again) until this is taken back:
+    // the quality test and the optimiser measure in-between frames. Nothing is rebuilt.
+    void setPushFlowPredictPaused(bool paused) { pushFlowPredictPaused_ = paused; }
     // PushFlow summary for the live stats: "fp32"/"fp16", rebuild, inference p50/p95 ms (0 when not running).
-    struct PushFlowSummary { std::string precision; bool rebuild = false; double p50Ms = 0, p95Ms = 0; };
+    // motionWidth / motionHeight: the size the network works the motion out at (0 while PushFlow is not running).
+    // encoderCache: "" not asked for, "on", or why it is not used (PushFlowBackend.h Status::splitState).
+    struct PushFlowSummary { std::string precision; bool rebuild = false; double p50Ms = 0, p95Ms = 0; uint32_t motionWidth = 0, motionHeight = 0;
+                             std::string encoderCache; uint64_t encoderRuns = 0, featuresKept = 0, featuresMade = 0; double wholeMs = 0, splitMs = 0, splitCheckDb = 0;
+                             // guard: "" not asked for, "on", or why not; frames it judged, mended in places, held whole.
+                             std::string guard; uint64_t guardFrames = 0, guardMended = 0, guardHeld = 0;
+                             // predict: "" not asked for, "on", or why not; forecast frames made, and of the pixels
+                             // counted in them how many the motion would move and how many of those were held.
+                             std::string predict; uint64_t predictFrames = 0, predictCounted = 0, predictMoving = 0, predictHeld = 0; };
     PushFlowSummary pushFlowSummary() const;
     bool amfFrcActive() const;
     const char* fsrProviderVersion() const;
@@ -1162,6 +1188,7 @@ private:
     std::unique_ptr<gfx::FsrFgPresenter> fsrFgBackend_;
     std::unique_ptr<gfx::AmfFrcBackend> amfFrc_;
     std::unique_ptr<pushflow::PushFlowBackend> pushFlow_;
+    bool pushFlowPredictPaused_=false;
     std::unique_ptr<gfx::FsrSrBackend> fsrSrBackend_;
     std::unique_ptr<NisPass> nisPass_;  // PushFPS: NVIDIA Image Scaling SR
     std::unique_ptr<PushHudLock> hudLock_;  // PushFPS: Live HUD Lock

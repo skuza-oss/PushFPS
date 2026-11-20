@@ -246,6 +246,24 @@ Item {
             veyra.captureDeviceLabel = "USB Video"
             compare(findChild(quick, "pushfps-card-status").text, qsTr("未测试"))
         }
+        // Capture card reports from users: said as a user's report, not as PushFPS's own test, and
+        // a card whose name contains another's (HD60 S+ and HD60 S, Ultra and Ultra 2.1) keeps its own.
+        function test_capture_cards_reported_by_users() {
+            const row = findChild(quick, "pushfps-card-row")
+            veyra.captureDeviceLabel = "Game Capture HD60 S"
+            compare(findChild(quick, "pushfps-card-status").text, qsTr("已测试"))
+            compare(row.hint, qsTr("有 PushFPS 用户报告可用"))
+            veyra.captureDeviceLabel = "Game Capture HD60 S+"
+            compare(findChild(quick, "pushfps-card-status").text, qsTr("未测试"))
+            veyra.captureDeviceLabel = "Game Capture HD60 X"
+            compare(row.hint, qsTr("PushFPS 已实测"))
+            veyra.captureDeviceLabel = "AVerMedia Live Gamer Ultra 2.1"
+            compare(findChild(quick, "pushfps-card-status").text, qsTr("已测试"))
+            compare(row.hint, qsTr("有 PushFPS 用户报告可用"))
+            veyra.captureDeviceLabel = "AVerMedia Live Gamer Ultra-Video"
+            compare(findChild(quick, "pushfps-card-status").text, qsTr("未测试"))
+            veyra.captureDeviceLabel = "USB Video"
+        }
         function test_tools_open_their_dialogs() {
             const list = []
             const handler = p => list.push(p)

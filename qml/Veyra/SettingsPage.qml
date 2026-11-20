@@ -792,8 +792,9 @@ VPage {
                         VRow {
                             label: qsTr("对比片段")
                             hint: {
-                                const n = Number(veyra.preferences.pushCompareLayout || 0)
-                                return n === 2 ? qsTr("竖屏 9:16，适合 TikTok、Shorts 和 Reels：上面是原帧率，下面是 PushFPS，各占半屏（取画面中间部分）")
+                                const n = CompareClip.layout(veyra.preferences)
+                                return n === 3 ? qsTr("整个画面：先是原帧率，一条线从左扫到右露出 PushFPS，停一会儿再扫回去，如此反复")
+                                     : n === 2 ? qsTr("竖屏 9:16，适合 TikTok、Shorts 和 Reels：上面是原帧率，下面是 PushFPS，各占半屏（取画面中间部分）")
                                      : n === 1 ? qsTr("完整画面并排两份：左边是原帧率，右边是 PushFPS")
                                      : qsTr("同一个画面从中间分开：左半边是原帧率，右半边是 PushFPS")
                             }
@@ -801,11 +802,8 @@ VPage {
                                 spacing: 8
                                 VSeg {
                                     objectName: "set-compare-layout"
-                                    options: [{ id: "0", label: qsTr("分屏") }, { id: "1", label: qsTr("并排") }, { id: "2", label: qsTr("竖屏") }]
-                                    current: {
-                                        const n = Number(veyra.preferences.pushCompareLayout || 0)
-                                        return String(n === 1 || n === 2 ? n : 0)
-                                    }
+                                    options: [{ id: "0", label: qsTr("分屏") }, { id: "1", label: qsTr("并排") }, { id: "2", label: qsTr("竖屏") }, { id: "3", label: qsTr("滑动揭示") }]
+                                    current: String(CompareClip.layout(veyra.preferences))
                                     onPicked: id => veyra.setPreference("pushCompareLayout", Number(id))
                                 }
                                 VSeg {
@@ -825,6 +823,37 @@ VPage {
                                 objectName: "set-compare-until-stop"
                                 checked: CompareClip.untilStop(veyra.preferences)
                                 onToggled: v => veyra.setPreference("pushCompareUntilStop", v)
+                            }
+                        }
+                        // Split and Reveal clips fill the frame: the height they are recorded at.
+                        VRow {
+                            objectName: "set-compare-quality-row"
+                            visible: CompareClip.takesQuality(CompareClip.layout(veyra.preferences))
+                            label: qsTr("片段画质")
+                            hint: {
+                                const q = CompareClip.quality(veyra.preferences)
+                                return q === 2160 ? qsTr("最高按 4K 录制，每一帧都录：需要较强的显卡。若有帧没录下，录完会提示，请选低一档")
+                                     : q > 0 ? qsTr("最高按所选的高度录制（画面本身更小时保持原样，不放大），并用更高的码率")
+                                     : qsTr("按画面原本的大小录制，最高 1440p")
+                            }
+                            VSeg {
+                                objectName: "set-compare-quality"
+                                options: CompareClip.qualities.map(n => ({ id: String(n), label: n > 0 ? CompareClip.qualityName(n) : qsTr("自动") }))
+                                current: String(CompareClip.quality(veyra.preferences))
+                                onPicked: id => veyra.setPreference("pushCompareQuality", Number(id))
+                            }
+                        }
+                        // Reveal: how often the line sweeps.
+                        VRow {
+                            objectName: "set-compare-reveal-row"
+                            visible: CompareClip.layout(veyra.preferences) === 3
+                            label: qsTr("扫过间隔")
+                            hint: qsTr("线条每隔这么久扫过一次，在原帧率和 PushFPS 之间切换")
+                            VSeg {
+                                objectName: "set-compare-reveal"
+                                options: CompareClip.revealIntervals.map(n => ({ id: String(n), label: qsTr("%1 秒").arg(n) }))
+                                current: String(CompareClip.revealEvery(veyra.preferences))
+                                onPicked: id => veyra.setPreference("pushCompareRevealSeconds", Number(id))
                             }
                         }
                         VRow {
@@ -1768,6 +1797,13 @@ VPage {
                             label: qsTr("诊断信息")
                             hint: qsTr("复制后附在反馈里")
                             VButton { text: qsTr("复制"); onClicked: veyra.copyDiagnostics() }
+                        }
+                        // PushFPS: what the session playing now really does, to copy (engine/PushPerfReport.h).
+                        VRow {
+                            objectName: "set-perfreport"
+                            label: qsTr("性能报告")
+                            hint: qsTr("复制这次播放的实际数据：显卡和驱动、设置、游戏帧率、补出的帧率和软件延迟。里面没有任何个人信息，可以附在反馈或硬件报告里")
+                            VButton { objectName: "set-perfreport-copy"; text: qsTr("复制"); onClicked: veyra.pushCopyPerformanceReport() }
                         }
                         // PushFPS: PushFlow's benchmark on this PC's graphics card (PushCardTestDialog.qml).
                         VRow {

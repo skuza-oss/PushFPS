@@ -68,8 +68,9 @@ These steps need the owner's own Steam account and cannot be done from CI:
 **Tags:** Utilities, Video Production, Free to Play, Software, Gaming, Controller.
 
 **System requirements** (same as the README's "What you need"): Windows 11 64-bit with DirectX 12;
-NVIDIA RTX 30 series minimum (RTX 40 or 50 recommended), AMD Radeon with FSR frame generation (2×),
-ANR on GTX 16 and newer, RX 5000 and newer and Intel Arc (Apex's list); a capture card that shows up as
+any DirectX 12 graphics card for PushFlow (2× to 4×) and FSR frame generation (2×); NVIDIA RTX 30 series
+for NVIDIA's methods (RTX 40 or 50 recommended); ANR on GTX 16 and newer, RX 5000 and newer and Intel Arc
+(Apex's list); a capture card that shows up as
 a camera and sends 1080p60 uncompressed, on a USB 3 port directly on the PC; a 120 Hz screen for 120 FPS.
 
 Avoid on the store page and in capsules: game names or artwork, "DLSS" in headlines, NVIDIA logos,

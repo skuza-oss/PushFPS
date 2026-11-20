@@ -47,7 +47,7 @@ using Microsoft::WRL::ComPtr;
 namespace {
 
 constexpr unsigned kSlots=6;
-constexpr uint32_t kCompareMaxHeight=1440;   // PushFPS comparison clips (split, side by side): recorded height cap
+constexpr uint32_t kCompareMaxHeight=1440;   // PushFPS comparison clips (split, side by side, reveal): recorded height cap unless a quality is chosen
 constexpr size_t kBacklogSkipBytes=size_t(64)<<20;   // the disk is behind: skip frames
 constexpr size_t kBacklogFailBytes=size_t(512)<<20;  // far behind: stop with an error
 constexpr int kAudioRate=48000;
@@ -462,6 +462,8 @@ struct LiveRecorder::Segment final : sink::RecordingAudioSink, MicrophoneSink, P
     bool compareClip=false;                     // RecordingCompare: split comparison picture
     RecordingLabelRenderer compareLabels;
     CompareLayout compareLayout=CompareLayout::Split;
+    double compareRevealSeconds=3.0;            // Reveal: a sweep starts every so many seconds
+    uint32_t compareQuality=0;                  // the height the user chose for the clip (0: automatic)
     std::unique_ptr<RecordingCompare> compare;
     // PushFPS streaming mode scenes (PushStreamOverlay.h): the scene picture blended onto every frame
     // (not on comparison clips). A replaced one stays alive until the frames that used it are done.
@@ -639,12 +641,13 @@ struct LiveRecorder::Segment final : sink::RecordingAudioSink, MicrophoneSink, P
             }
             compare=std::make_unique<RecordingCompare>();
             if(!compare->create(device.Get(),planeWidth,planeHeight,hdr,left,right,reason,compareLayout))return false;
+            compare->setRevealInterval(compareRevealSeconds);
             if(compare->outputY()&&(compare->outputWidth()!=width||compare->outputHeight()!=height)){reason=L"对比片段尺寸不一致";return false;}
             const auto crop=compare->crop();
-            veyra::log::info("live-recorder",std::format("comparison clip layout={} extent={}x{} frame={}x{} crop={}x{}+{}+{} hdr={} copied={} blended={} rawConsole={} labels={}x{} / {}x{}",
-                compareLayout==CompareLayout::SideBySide?"side-by-side":compareLayout==CompareLayout::Vertical?"vertical":"split",width,height,frameWidth,frameHeight,
+            veyra::log::info("live-recorder",std::format("comparison clip layout={} extent={}x{} frame={}x{} crop={}x{}+{}+{} hdr={} copied={} blended={} rawConsole={} labels={}x{} / {}x{} quality={} revealEvery={:.1f}s line={}",
+                compareLayout==CompareLayout::SideBySide?"side-by-side":compareLayout==CompareLayout::Vertical?"vertical":compareLayout==CompareLayout::Reveal?"reveal":"split",width,height,frameWidth,frameHeight,
                 crop.width,crop.height,crop.x,crop.y,hdr,compare->patches().size(),compare->overlays().size(),
-                compare->rawAvailable(),left.width,left.height,right.width,right.height));
+                compare->rawAvailable(),left.width,left.height,right.width,right.height,compareQuality,compareRevealSeconds,compare->revealLineWidth()));
         }
         encoderThread=std::thread([this]{encoderMain();});
         writerThread=std::thread([this]{writerMain();});
@@ -753,7 +756,8 @@ struct LiveRecorder::Segment final : sink::RecordingAudioSink, MicrophoneSink, P
         }
         if(compare){
             const RecordingRawFrame raw{frame.raw,frame.rawSdrInHdr};
-            compare->compose(list,states,y.Get(),uv.Get(),frame.generated,frame.raw?&raw:nullptr,unsigned(index));
+            // The frame's own time in the clip places the Reveal layout's line.
+            compare->compose(list,states,y.Get(),uv.Get(),frame.generated,frame.raw?&raw:nullptr,unsigned(index),double(pts)/1e6);
             if(frame.generated)++generated;
         }
         // What is encoded: the recorder's planes, or a vertical comparison clip's own picture.
@@ -1187,6 +1191,10 @@ struct LiveRecorder::Segment final : sink::RecordingAudioSink, MicrophoneSink, P
                     if(finished.noSpace&&noteText().empty())setNote(L"磁盘剩余空间不足，无法整理成标准 MP4：录制已按原样保存，可以正常播放，但部分剪辑软件打不开");
                 }
             }
+            // A clip at a chosen quality that lost frames: said, with what to do about it. (Automatic
+            // quality keeps its silence: nothing about those clips changes.)
+            if(compareQuality&&videoWritten.load()&&compareClipFellBehind(videoWritten.load(),dropped.load())&&noteText().empty())
+                setNote(L"这段对比片段有一部分帧没能录下：显卡跟不上所选的片段画质，请选低一档再录");
             veyra::log::info("live-recorder",std::format("file closed path={} videoFrames={} seconds={:.2f} originUs={} audio={} audioGaps={} audioOverflow={} microphoneGaps={} microphoneOverflow={} soundBlocks={} mixerSilenced={} dropped={} ok={}{}",
                 utf8(path),videoWritten.load(),double(end)/1e6,t0Us.load(),audio.load(),soundLane.gaps.load(),soundLane.overflow.load(),micLane.gaps.load(),micLane.overflow.load(),
                 soundBlocks.load(),mixerSilenced.load(),dropped.load(),ok,
@@ -1580,8 +1588,11 @@ bool LiveRecorder::record(ID3D12GraphicsCommandList* list,const Frame& frame){
         // that is more than a hardware encoder takes, real frames were dropped and the console side
         // froze or showed a picture seconds old (field report 2026-11-17). They are recorded at most
         // 1440 pixels high, scaled once by PushCanvasConvert; the vertical layout has its own 1080 x 1920.
-        else if(!s.replayMode&&s.settings.compareLayout!=CompareLayout::Vertical&&frame.height>kCompareMaxHeight){
-            const uint32_t oh=kCompareMaxHeight;
+        // Split and Reveal clips take the height the user chose instead (compareClipHeightCap: 1080, 1440
+        // or 2160; a picture is never enlarged): the encode is then tuned to keep up (compareClipPreset).
+        else if(const uint32_t cap=compareClipHeightCap(s.settings.compareLayout,s.settings.compareMaxHeight);
+                !s.replayMode&&s.settings.compareLayout!=CompareLayout::Vertical&&frame.height>cap){
+            const uint32_t oh=cap;
             const uint32_t ow=std::max<uint32_t>(16,uint32_t(std::lround(double(frame.width)*oh/frame.height))&~1u);
             segment->canvas=PushCanvas{};segment->canvasPass=true;segment->liveLayout=false;
             segment->width=ow;segment->height=oh;segment->planeWidth=ow;segment->planeHeight=oh;
@@ -1609,6 +1620,15 @@ bool LiveRecorder::record(ID3D12GraphicsCommandList* list,const Frame& frame){
         segment->compareClip=s.settings.compare&&!s.replayMode;
         segment->compareLabels=s.settings.compareLabels;
         segment->compareLayout=s.settings.compareLayout;
+        segment->compareRevealSeconds=s.settings.compareRevealSeconds;
+        // A chosen clip quality (Split and Reveal): a third more bits than a recording of that size
+        // gets, and an encoder preset the card keeps up with at that many pixels a second. Automatic
+        // (0), side by side and vertical clips are encoded exactly as before.
+        segment->compareQuality=segment->compareClip&&compareClipHeightChosen(s.settings.compareLayout,s.settings.compareMaxHeight)?s.settings.compareMaxHeight:0;
+        if(segment->compareQuality){
+            if(!s.settings.bitrateMbps&&!s.settings.bitrateKbps)segment->bitrateMbps=compareClipBitrateMbps(segment->bitrateMbps);
+            segment->preset=compareClipPreset(segment->preset,segment->width,segment->height,segment->fps);
+        }
         segment->audio=segment->sound||segment->microphone;
         if(s.streamMode){
             // Platforms take H.264 + AAC at a constant bitrate with a keyframe every 2 s (OBS's

@@ -70,6 +70,22 @@ DialogLayer {
             value: (Number(qt.st.gainOverBlend || 0) >= 0 ? "+" : "") + qt.db(qt.st.gainOverBlend)
             hint: qsTr("把前后两帧各取一半的结果为 %1；补帧应该比它好").arg(qt.db(qt.st.blendPsnr))
         }
+        // Since 3.2.7: what an average hides. A fast object PushFlow leaves out costs the whole picture a
+        // fraction of a dB and one place nearly everything (engine/PushQuality.h, worstTilePsnr).
+        VRow {
+            visible: qt.st.done === true && Number(qt.st.worstFramePsnr || 0) > 0
+            objectName: "quality-test-worst-frame"
+            label: qsTr("最差的一帧")
+            value: qt.db(qt.st.worstFramePsnr)
+            hint: qsTr("这次测试里最不准的那一帧；平均值会把它盖住")
+        }
+        VRow {
+            visible: qt.st.done === true && Number(qt.st.worstPlacePsnr || 0) > 0
+            objectName: "quality-test-worst-place"
+            label: qsTr("最差的位置")
+            value: qt.db(qt.st.worstPlacePsnr)
+            hint: qsTr("把画面分成 144 块，取每帧最不准的一块。快速移动的物体在生成帧里消失或出现重影时，整体分数几乎不变，这里会明显变低")
+        }
         VRow {
             visible: qt.st.done === true
             label: qsTr("像素误差")

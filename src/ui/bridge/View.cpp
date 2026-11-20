@@ -331,6 +331,23 @@ void QmlPlayerBridge::setAspectMode(int value) {
     if (gameMode()) { updateGameGeometry(); updateGameMode(); emit gameModeChanged(); }
     emit compareChanged();
 }
+// PushFPS crop and resize of the console picture (quick setup, PushCropDialog.qml, PushCrop.js).
+// Preferences: pushCropL/T/R/B in thousandths of the picture, pushCropZoom in percent, pushCropX/Y in
+// thousandths of the window, all behind the switch pushCropOn. Only for a console picture (capture
+// card, PS5, Sunshine, Xbox, another program's frames): a film or a captured window keeps its whole
+// picture. Not while XeSS presents its own frames: its guidance is made for the whole picture.
+std::array<int, 7> QmlPlayerBridge::pushCropValues() const {
+    static constexpr std::array<int, 7> none{0, 0, 0, 0, 100, 0, 0};
+    const auto& i = *impl_;
+    if (!i.prefBool("pushCropOn", false) || i.snapshot.presentationProviderOwned) return none;
+    const QString kind = sourceKind();
+    if (kind != QLatin1String("capture") && kind != QLatin1String("ps5") && kind != QLatin1String("moonlight") &&
+        kind != QLatin1String("xbox") && kind != QLatin1String("frameinput")) return none;
+    return {std::clamp(i.prefInt("pushCropL", 0), 0, 450), std::clamp(i.prefInt("pushCropT", 0), 0, 450),
+            std::clamp(i.prefInt("pushCropR", 0), 0, 450), std::clamp(i.prefInt("pushCropB", 0), 0, 450),
+            std::clamp(i.prefInt("pushCropZoom", 100), 25, 400),
+            std::clamp(i.prefInt("pushCropX", 0), -1000, 1000), std::clamp(i.prefInt("pushCropY", 0), -1000, 1000)};
+}
 void QmlPlayerBridge::applyAspect(bool force) {
     auto& i = *impl_;
     const bool aligned=gameMode()&&i.presentation.fullscreen&&!gameScaledPreview();
@@ -340,14 +357,28 @@ void QmlPlayerBridge::applyAspect(bool force) {
     const auto e = i.snapshot.metrics.resolution.output;
     const QSize client(r.right, r.bottom), image(int(e.width), int(e.height));
     const double dar=sourceAspect();
-    if (!force && mode == i.aspectApplied && client == i.screenFitClient && image == i.screenFitImage && dar == i.screenFitAspect) return;
-    i.screenFitClient = client; i.screenFitImage = image; i.aspectApplied = mode; i.screenFitAspect = dar;
+    // PushFPS crop and resize: never in game mode's aligned view, where the picture and the mouse match.
+    const std::array<int, 7> crop = aligned ? std::array<int, 7>{0, 0, 0, 0, 100, 0, 0} : pushCropValues();
+    if (!force && mode == i.aspectApplied && client == i.screenFitClient && image == i.screenFitImage && dar == i.screenFitAspect && crop == i.pushCropApplied) return;
+    i.screenFitClient = client; i.screenFitImage = image; i.aspectApplied = mode; i.screenFitAspect = dar; i.pushCropApplied = crop;
     auto view=force||aligned?engine::PreviewView{}:i.engine.previewView();
     view.mode=mode;
     view.displayAspect=dar>0&&image.height()>0&&std::abs(dar-double(image.width())/image.height())>.001?dar:0;
+    // The crop, the size and the position, every time: with the neutral values this is the view as it
+    // always was here (whole picture, zoom 1, centred), so nothing changes for a picture without them.
+    view.cropLeft=crop[0]/1000.0f;view.cropTop=crop[1]/1000.0f;view.cropRight=crop[2]/1000.0f;view.cropBottom=crop[3]/1000.0f;
+    view.zoom=crop[4]/100.0f;
+    view.centerX=view.cropCenterX();view.centerY=view.cropCenterY();
+    if((crop[5]||crop[6])&&client.width()>0&&client.height()>0&&image.width()>0&&image.height()>0){
+        // Moving the picture right by a share of the window is the same as moving the view's centre
+        // left by that many of the picture's own drawn pixels.
+        auto sized=view;if(sized.displayAspect==0)sized.displayAspect=i.engine.previewView().displayAspect;
+        const auto [rw,rh]=sized.renderedSize(float(client.width()),float(client.height()),float(image.width()),float(image.height()));
+        if(rw>0&&rh>0){view.centerX-=crop[5]/1000.0f*float(client.width())/rw;view.centerY-=crop[6]/1000.0f*float(client.height())/rh;}
+    }
     i.engine.previewView(view);
-    veyra::log::info("ui-aspect", std::format("mode={} zoom={:.3f} dar={:.4f} client={}x{} image={}x{}",mode,view.zoom,dar,
-        client.width(),client.height(),image.width(),image.height()));
+    veyra::log::info("ui-aspect", std::format("mode={} zoom={:.3f} dar={:.4f} client={}x{} image={}x{} crop={},{},{},{} offset={},{}",mode,view.zoom,dar,
+        client.width(),client.height(),image.width(),image.height(),crop[0],crop[1],crop[2],crop[3],crop[5],crop[6]));
 }
 
 // --- design gap D18 / C15 / E20 / F21 / F24 ------------------------------------

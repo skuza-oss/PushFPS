@@ -9,6 +9,8 @@
 
 namespace veyra::ui {
 // --- capture dialog ----------------------------------------------------------
+// PushFPS: how long a device query may run before the dialog says the devices have not answered.
+static constexpr int kCaptureQuerySlowSeconds = 10;
 static std::vector<source::CaptureDevice> captureAudioDeviceDetails() {
     auto devices = source::CaptureCardSource::deviceDetails(true);
     for (auto& endpoint : source::WasapiAudioInput::devices(true))
@@ -340,6 +342,8 @@ void QmlPlayerBridge::queryCapture(int kind, std::wstring device) {
     auto& i = *impl_;
     if (captureQueryBusy()) { i.captureNextQuery=std::pair{kind,std::move(device)};return; }
     i.captureBusy = true; i.captureQueryKind = kind;
+    i.captureQueryStarted = std::chrono::steady_clock::now(); i.captureQuerySlowNoted = false;
+    veyra::log::info("capture-ui", std::format("query kind={} started", kind));
     i.captureStatus = kind == 0 ? tr("正在查询采集设备…当前播放继续") : tr("正在读取设备支持的格式…");
     const auto preferred=kind==2?i.capturePrefs.formatKey:
         kind==3&&!i.captureDriverFormatKey.empty()?i.captureDriverFormatKey:i.captureFormatKey;
@@ -364,9 +368,23 @@ void QmlPlayerBridge::queryCapture(int kind, std::wstring device) {
 }
 void QmlPlayerBridge::tickCapture() {
     auto& i = *impl_;
-    if (!i.captureBusy || i.captureQuery.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    if (!i.captureBusy) return;
+    if (i.captureQuery.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+        // PushFPS: the query waits on the devices' drivers and normally answers within a second or two.
+        // After kCaptureQuerySlowSeconds the dialog says so once and what to try, instead of showing
+        // a busy mark with no explanation. Nothing is cancelled: a driver that answers late is still used.
+        if (!i.captureQuerySlowNoted && std::chrono::steady_clock::now() - i.captureQueryStarted >= std::chrono::seconds(kCaptureQuerySlowSeconds)) {
+            i.captureQuerySlowNoted = true;
+            i.captureStatus = tr("采集设备还没有响应。如果一直这样：关闭其他正在使用采集卡或摄像头的软件，把设备拔下再插回，然后重新启动 PushFPS。");
+            veyra::log::warn("capture-ui", std::format("query kind={} still waiting after {} s", i.captureQueryKind, kCaptureQuerySlowSeconds));
+            emit captureChanged();
+        }
+        return;
+    }
     auto q = i.captureQuery.get();
     i.captureBusy = false;
+    veyra::log::info("capture-ui", std::format("query kind={} answered ms={}", q.kind,
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - i.captureQueryStarted).count()));
     if(i.captureNextQuery){auto next=std::move(*i.captureNextQuery);i.captureNextQuery.reset();queryCapture(next.first,std::move(next.second));return;}
     if(FAILED(q.info.code)&&q.formats.empty()){
         if(q.kind!=0&&q.device!=i.captureDevice){emit captureChanged();return;}

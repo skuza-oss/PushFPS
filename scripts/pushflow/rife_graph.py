@@ -77,6 +77,121 @@ def expose(model, batched=True):
     return m, {"align_corners": align, "padding_mode": pad, "batched": batched}
 
 
+def split_encoder(model):
+    """The model cut in two (PushFlow 2, Fusion's first step): what depends on ONE real frame, and the rest.
+
+    RIFE 4.25 / 4.26 begin with a small feature encoder that takes the two frames as a batch of two and never
+    sees the time. Run on its own it has to be done once for every real frame, not twice for every generated
+    frame. Returns (encoder0, encoder1, body, info):
+
+      encoder1 input: the model's own input [1, C, H, W]; output pushflow_feat [1, F, Hp, Wp], the features
+               of the SECOND frame in it (channels 3..5): the one run for every new real frame.
+      encoder0 the same for the FIRST frame (channels 0..2). Its features are normally the ones the pair
+               before produced; this one is run only when there was no pair before (a start, a reset, a
+               pair that was skipped).
+      body     inputs: the model's own input, pushflow_feat0 and pushflow_feat1 (the first and second frame's
+               features); outputs exactly as the model's.
+
+    Nothing is retrained or approximated: the same nodes with the same weights, so the two together must give
+    the whole model's output, which prepare_runtime.py checks before it ships them. Raises ValueError when the
+    model does not begin the way this reading expects."""
+    import onnx
+    from onnx import helper, numpy_helper
+    g = model.graph
+    nodes = list(g.node)                       # nodes are told apart by their place in this list
+    produced = {o: k for k, n in enumerate(nodes) for o in n.output}
+    readers = {}
+    for k, n in enumerate(nodes):
+        for i in n.input:
+            readers.setdefault(i, []).append(k)
+    init = {i.name: i for i in g.initializer}
+    source = [i.name for i in g.input if i.name not in init][0]
+    first = next((k for k, n in enumerate(nodes) if n.op_type == "Conv"), None)
+    if first is None:
+        raise ValueError("no convolution")
+    stack = nodes[first].input[0]
+    # The encoder's input is the two frames stacked on the batch axis: a Reshape of the first six channels.
+    walk, seen_ops = stack, []
+    while walk in produced and len(seen_ops) < 6:
+        n = nodes[produced[walk]]
+        seen_ops.append(n.op_type)
+        walk = n.input[0]
+    if walk != source or seen_ops[:1] != ["Reshape"] or not set(seen_ops) <= {"Reshape", "Split", "Slice", "Pad", "Cast", "Identity"}:
+        raise ValueError(f"the first convolution does not read the stacked frames ({seen_ops} from {walk})")
+    link = {"Conv", "ConvTranspose", "LeakyRelu", "Relu", "PRelu"}
+    chain, at = [], first
+    while True:
+        chain.append(at)
+        tensor = nodes[at].output[0]
+        after = readers.get(tensor, [])
+        if len(after) != 1 or nodes[after[0]].op_type not in link or nodes[after[0]].input[0] != tensor:
+            break
+        at = after[0]
+    last = nodes[chain[-1]]
+    convs = [k for k in chain if nodes[k].op_type in ("Conv", "ConvTranspose")]
+    if len(convs) < 2 or last.op_type not in ("Conv", "ConvTranspose") or not readers.get(tensor):
+        raise ValueError(f"no encoder found at the start ({[nodes[k].op_type for k in chain]})")
+    feat = tensor
+    weight = init.get(last.input[1])
+    if weight is None:
+        raise ValueError("the encoder's last weights are not in the model")
+    features = int(weight.dims[1] if last.op_type == "ConvTranspose" else weight.dims[0])
+    in_chain = set(chain)
+
+    def rebuilt(new_nodes, outputs, extra_weights=()):
+        """A copy of the model with these nodes, only what the outputs need of them and of the weights."""
+        need, todo, kept = set(outputs), list(outputs), set()
+        by_output = {o: k for k, n in enumerate(new_nodes) for o in n.output}
+        while todo:
+            k = by_output.get(todo.pop())
+            if k is None or k in kept:
+                continue
+            kept.add(k)
+            for i in new_nodes[k].input:
+                if i and i not in need:
+                    need.add(i)
+                    todo.append(i)
+        m = onnx.ModelProto()
+        m.CopyFrom(model)
+        del m.graph.node[:]
+        m.graph.node.extend([n for k, n in enumerate(new_nodes) if k in kept])
+        weights = [i for i in list(model.graph.initializer) + list(extra_weights) if i.name in need]
+        del m.graph.initializer[:]
+        m.graph.initializer.extend(weights)
+        del m.graph.value_info[:]
+        return m
+
+    def features_info(name):
+        return helper.make_tensor_value_info(name, onnx.TensorProto.FLOAT, [1, features, "pushflow_fh", "pushflow_fw"])
+
+    # --- the body: the model without the encoder, the features given from outside ---
+    body_nodes = [helper.make_node("Concat", ["pushflow_feat0", "pushflow_feat1"], [feat], axis=0, name="pushflow_features_in")]
+    body_nodes += [n for k, n in enumerate(nodes) if k not in in_chain]
+    body = rebuilt(body_nodes, [o.name for o in g.output])
+    body.graph.input.extend([features_info("pushflow_feat0"), features_info("pushflow_feat1")])
+
+    # --- the encoders: the model's own beginning, for one of the two frames alone ---
+    def encoder_for(which):
+        picks = [numpy_helper.from_array(np.array(value, dtype=np.int64), name)
+                 for name, value in (("pushflow_enc_from", [which]), ("pushflow_enc_to", [which + 1]), ("pushflow_enc_axis", [0]))]
+        enc_nodes = []
+        for k, n in enumerate(nodes):
+            if k == first:
+                enc_nodes.append(helper.make_node("Slice", [stack, "pushflow_enc_from", "pushflow_enc_to", "pushflow_enc_axis"], ["pushflow_one_frame"], name="pushflow_one_frame_in"))
+                changed = onnx.NodeProto()
+                changed.CopyFrom(n)
+                changed.input[0] = "pushflow_one_frame"
+                enc_nodes.append(changed)
+            else:
+                enc_nodes.append(n)
+        enc_nodes.append(helper.make_node("Identity", [feat], ["pushflow_feat"], name="pushflow_feat_out"))
+        encoder = rebuilt(enc_nodes, ["pushflow_feat"], picks)
+        del encoder.graph.output[:]
+        encoder.graph.output.append(features_info("pushflow_feat"))
+        return encoder
+    return encoder_for(0), encoder_for(1), body, {"features": features, "encoder_nodes": [nodes[k].op_type for k in chain], "cut_at": feat}
+
+
 def grid_sample(img, grid, align_corners, padding="border"):
     """numpy GridSample, bilinear: img [C,H,W], grid [H',W',2] in -1..1 (x, y)."""
     c, h, w = img.shape

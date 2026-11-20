@@ -1,0 +1,500 @@
+{
+ "about": "What must keep working whenever PushFlow or anything near it changes, and the automated test that guards each part. scripts/checks/protected_features.py (run by the checks workflow on every push) fails when a file named here is gone, when its test is no longer run by a workflow, or when a text it must hold is gone: a guard cannot be deleted or unplugged without this file saying so. 'needs_hardware' is what no automated test here can show. docs/PUSHFLOW2.md explains the rules.",
+ "features": [
+  {
+   "id": "F01",
+   "what": "Capture cards: formats, the mode asked for and the mode agreed, compressed decoding, colour range, HDR detection, the capture card list",
+   "guards": [
+    {
+     "file": "tests/unit/CaptureColorContractTests.cpp",
+     "ci": "veyra_capture_color_tests"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_presets.qml",
+     "ci": "tst_push_presets"
+    },
+    {
+     "file": "qml/Veyra/PushCaptureCards.js"
+    }
+   ],
+   "needs_hardware": "A real capture card. Nothing in CI opens one; a card works when the owner or a user's report says so."
+  },
+  {
+   "id": "F02",
+   "what": "PS5 Remote Play: pairing, reconnect, controller forwarding (buttons that stayed pressed), sound",
+   "guards": [
+    {
+     "file": "tests/remoteplay/feedback-history/wire.c",
+     "ci": "veyra_remoteplay_feedback_wire_tests"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_ps5_pairing.qml",
+     "ci": "tst_push_ps5_pairing"
+    },
+    {
+     "file": "scripts/remoteplay/verify-chiaki-stage.py",
+     "ci": "verify-chiaki-stage.py"
+    }
+   ],
+   "needs_hardware": "A PS5. The wire test runs against a loopback, never a console."
+  },
+  {
+   "id": "F03",
+   "what": "Moonlight / Sunshine, Xbox streaming with damaged-frame recovery, window and screen capture, files, the frame input API",
+   "guards": [
+    {
+     "file": "tests/unit/FrameInputTests.cpp",
+     "ci": "veyra_frame_input_tests"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_frame_input.qml",
+     "ci": "tst_push_frame_input"
+    },
+    {
+     "file": "scripts/moonlight/verify-moonlight-stage.py",
+     "ci": "verify-moonlight-stage.py"
+    },
+    {
+     "file": "include/pushfps/FrameInput.h"
+    }
+   ],
+   "needs_hardware": "A Sunshine host and an Xbox for the streaming sources."
+  },
+  {
+   "id": "F04",
+   "what": "Every frame generation method stays selectable and really generates: none may be selected and silently do nothing",
+   "guards": [
+    {
+     "file": "tests/integration/PushFlowGraphTests.cpp",
+     "ci": "veyra_push_flow_graph_tests"
+    },
+    {
+     "file": "src/pipeline/EnhanceGraph.cpp",
+     "contains": "amfFrcActive() || pushFlowActive() ||"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_optimize.qml",
+     "ci": "tst_push_optimize"
+    },
+    {
+     "file": "tests/unit/PushFgHealthTests.cpp",
+     "ci": "veyra_push_fg_health_tests"
+    }
+   ],
+   "needs_hardware": "The vendor methods (need their makers' cards). Only PushFlow runs through the real graph in CI, on the software renderer."
+  },
+  {
+   "id": "F05",
+   "what": "PushFlow: Fast / Balanced / Quality and their own motion sizes, a motion size chosen apart from the tier (off means unchanged; the too-slow watch always takes a cheaper step), the rebuild at full size (the shader is what the motion contract says), half precision and its approval, PushFlow 2's experiments (each off unless switched on, the emergency stop, a damaged preference reads as off) its encoder cache (the pictures are the whole model's, whatever is kept or made anew) and Guard (a still picture and a followed object come out exactly as without it; it never moves a place further from the real frame), the adaptive multiplier; Predict (off by default: every batch without it ends with its real frame as it always did; with it a still picture stays exact and no forecast is further from the truth than holding the real frame)",
+   "guards": [
+    {
+     "file": "tests/integration/PushGpuTests.cpp",
+     "ci": "veyra_push_gpu_tests",
+     "contains": "the picture is the reference rebuild of the network's grids and mask"
+    },
+    {
+     "file": "tests/unit/PushFlowMotionTests.cpp",
+     "ci": "veyra_push_flow_motion_tests",
+     "contains": "every tier's size is exactly what it was"
+    },
+    {
+     "file": "tests/unit/PushFlowMotionTests.cpp",
+     "ci": "veyra_push_flow_motion_tests",
+     "contains": "every step of the watch makes PushFlow cheaper"
+    },
+    {
+     "file": "tests/integration/PushGpuTests.cpp",
+     "ci": "veyra_push_gpu_tests",
+     "contains": "Fast at the picture's size gives the picture Balanced gives here"
+    },
+    {
+     "file": "tests/integration/PushFlowGraphTests.cpp",
+     "ci": "veyra_push_flow_graph_tests",
+     "contains": "the tier's own motion size is what it was"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_flow2.qml",
+     "ci": "tst_push_flow2",
+     "contains": "test_motion_size_is_automatic_until_chosen"
+    },
+    {
+     "file": "tests/unit/PushHalfApprovalTests.cpp",
+     "ci": "veyra_push_half_approval_tests"
+    },
+    {
+     "file": "tests/unit/PushAdaptiveFgTests.cpp",
+     "ci": "veyra_push_adaptive_fg_tests"
+    },
+    {
+     "file": "scripts/pushflow/prepare_runtime.py",
+     "ci": "prepare_runtime.py",
+     "contains": "does not reproduce"
+    },
+    {
+     "file": "tests/unit/PushFlow2Tests.cpp",
+     "ci": "veyra_push_flow2_tests",
+     "contains": "nothing is on until a user turns it on"
+    },
+    {
+     "file": "tests/integration/PushGpuTests.cpp",
+     "ci": "veyra_push_gpu_tests",
+     "contains": "never taken from what was kept"
+    },
+    {
+     "file": "tests/integration/PushFlowGraphTests.cpp",
+     "ci": "veyra_push_flow_graph_tests",
+     "contains": "every generated frame is the one PushFlow makes without the cache"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_flow2.qml",
+     "ci": "tst_push_flow2",
+     "contains": "test_an_experiment_is_off_until_switched_on"
+    },
+    {
+     "file": "scripts/pushflow/prepare_runtime.py",
+     "ci": "prepare_runtime.py",
+     "contains": "does not reproduce the model (largest difference"
+    },
+    {
+     "file": "tests/unit/PushFlowGuardTests.cpp",
+     "ci": "veyra_push_flow_guard_tests",
+     "contains": "a slow pan taken from one frame only"
+    },
+    {
+     "file": "tests/integration/PushGpuTests.cpp",
+     "ci": "veyra_push_gpu_tests",
+     "contains": "a still picture and a followed object come out exactly as without Guard"
+    },
+    {
+     "file": "tests/integration/PushFlowGraphTests.cpp",
+     "ci": "veyra_push_flow_graph_tests",
+     "contains": "a followed object leaves every generated frame as PushFlow makes it without Guard"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_flow2.qml",
+     "ci": "tst_push_flow2",
+     "contains": "test_each_experiment_has_its_own_switch_and_its_own_state"
+    },
+    {
+     "file": "tests/unit/PushFlowPredictTests.cpp",
+     "ci": "veyra_push_flow_predict_tests",
+     "contains": "nothing moves: the forecast is the newest frame exactly"
+    },
+    {
+     "file": "tests/integration/PushGpuTests.cpp",
+     "ci": "veyra_push_gpu_tests",
+     "contains": "an in-between frame is still exactly PushFlow's own"
+    },
+    {
+     "file": "tests/integration/PushFlowGraphTests.cpp",
+     "ci": "veyra_push_flow_graph_tests",
+     "contains": "every batch ends with its real frame, as it always did"
+    },
+    {
+     "file": "tests/integration/PushFlowGraphTests.cpp",
+     "ci": "veyra_push_flow_graph_tests",
+     "contains": "every batch holds the real frame first and its forecasts after it, in order"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_flow2.qml",
+     "ci": "tst_push_flow2",
+     "contains": "test_predict_says_what_it_does_and_when_it_steps_aside"
+    },
+    {
+     "file": "tests/integration/PushPredictEngineTests.cpp",
+     "ci": "veyra_push_predict_engine_tests",
+     "contains": "while forecasts are shown, a real frame is on screen"
+    }
+   ],
+   "needs_hardware": "Speed on any real card; picture quality on real games."
+  },
+  {
+   "id": "F06",
+   "what": "Duplicate removal, Frame Pacing Repair, smooth pacing, variable refresh and the G-SYNC profile, lowest latency",
+   "guards": [
+    {
+     "file": "tests/unit/PushPacingRepairTests.cpp",
+     "ci": "veyra_push_pacing_repair_tests"
+    },
+    {
+     "file": "tests/unit/NvidiaVrrProfileTests.cpp",
+     "ci": "veyra_vrr_profile_tests"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_quick_setup.qml",
+     "ci": "tst_push_quick_setup"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_plug_and_play.qml",
+     "ci": "tst_push_plug_and_play"
+    }
+   ],
+   "needs_hardware": "A variable-refresh screen and a camera for anything about delay."
+  },
+  {
+   "id": "F07",
+   "what": "AI picture enhancement and its fine-tuning, upscaling, NVIDIA Image Scaling, the picture editor, crop and resize, wide-screen and ambient fill",
+   "guards": [
+    {
+     "file": "tests/integration/NisGpuTests.cpp",
+     "ci": "veyra_nis_gpu_tests"
+    },
+    {
+     "file": "tests/integration/PushGpuTests.cpp",
+     "ci": "veyra_push_gpu_tests",
+     "contains": "testEnhanceShape"
+    },
+    {
+     "file": "tests/unit/PushViewCropTests.cpp",
+     "ci": "veyra_push_view_crop_tests"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_crop.qml",
+     "ci": "tst_push_crop"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_nis.qml",
+     "ci": "tst_push_nis"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_picture_sound.qml",
+     "ci": "tst_push_picture_sound"
+    }
+   ],
+   "needs_hardware": "The vendor enhancement and upscaling runtimes."
+  },
+  {
+   "id": "F08",
+   "what": "Automatic HUD detection, Live HUD Lock, HUD boxes drawn by hand: what they protect and in which order",
+   "guards": [
+    {
+     "file": "tests/unit/PushHudTests.cpp",
+     "ci": "veyra_push_hud_tests"
+    },
+    {
+     "file": "tests/unit/PushHudPictureTests.cpp",
+     "ci": "veyra_push_hud_tests"
+    },
+    {
+     "file": "tests/integration/PushGpuTests.cpp",
+     "ci": "veyra_push_gpu_tests",
+     "contains": "PushHudLock"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_hud.qml",
+     "ci": "tst_push_hud"
+    }
+   ],
+   "needs_hardware": "Real games' HUDs: the detector is checked on drawn pictures."
+  },
+  {
+   "id": "F09",
+   "what": "Optimise for my PC, the frame quality test, Test my graphics card, the PS5 latency test, the no-generated-frames notice, the crash notice, the performance report",
+   "guards": [
+    {
+     "file": "tests/unit/PushBenchmarkTests.cpp",
+     "ci": "veyra_push_benchmark_tests"
+    },
+    {
+     "file": "tests/unit/PushQualityTests.cpp",
+     "ci": "veyra_push_quality_tests"
+    },
+    {
+     "file": "tests/unit/PushInputLatencyTests.cpp",
+     "ci": "veyra_push_input_latency_tests"
+    },
+    {
+     "file": "tests/unit/PushFgHealthTests.cpp",
+     "ci": "veyra_push_fg_health_tests"
+    },
+    {
+     "file": "tests/unit/PushCrashNoteTests.cpp",
+     "ci": "veyra_push_crash_note_tests"
+    },
+    {
+     "file": "tests/unit/PushPerfReportTests.cpp",
+     "ci": "veyra_push_perf_report_tests"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_optimize.qml",
+     "ci": "tst_push_optimize"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_tools.qml",
+     "ci": "tst_push_tools"
+    },
+    {
+     "file": "tests/unit/PushQualityTests.cpp",
+     "ci": "veyra_push_quality_tests",
+     "contains": "The worst place"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_flow2.qml",
+     "ci": "tst_push_flow2",
+     "contains": "test_quality_test_says_its_worst_frame_and_place"
+    }
+   ],
+   "needs_hardware": "Every number these tools produce."
+  },
+  {
+   "id": "F10",
+   "what": "Video playback mode and the professional editor: files, seeking, export",
+   "guards": [
+    {
+     "file": "tests/qml/quick/tst_push_watch.qml",
+     "ci": "tst_push_watch"
+    },
+    {
+     "file": "tests/qml/QuickSmokeTests.cpp",
+     "ci": "veyra_qml_quick_tests"
+    }
+   ],
+   "needs_hardware": "The editor's own tests are the upstream suite, run in CI as a report."
+  },
+  {
+   "id": "F11",
+   "what": "Recording and instant replay: files that open everywhere, the game and microphone mix, sound profiles",
+   "guards": [
+    {
+     "file": "tests/unit/Mp4FinalizeTests.cpp",
+     "ci": "veyra_mp4_finalize_tests"
+    },
+    {
+     "file": "tests/unit/PushAudioMixTests.cpp",
+     "ci": "veyra_push_audio_mix_tests"
+    },
+    {
+     "file": "tests/unit/SoundProfileTests.cpp",
+     "ci": "veyra_sound_profile_tests"
+    }
+   ],
+   "needs_hardware": "Hardware encoders (NVENC and the others)."
+  },
+  {
+   "id": "F12",
+   "what": "Comparison clips: split, side by side, vertical, reveal; lengths, quality, and the console side staying the raw console picture",
+   "guards": [
+    {
+     "file": "tests/unit/PushComparePlanTests.cpp",
+     "ci": "veyra_push_compare_plan_tests"
+    },
+    {
+     "file": "tests/integration/PushGpuTests.cpp",
+     "ci": "veyra_push_gpu_tests",
+     "contains": "testCompareReveal"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_compare.qml",
+     "ci": "tst_push_compare"
+    }
+   ],
+   "needs_hardware": "4K clips at high frame rates on a real encoder."
+  },
+  {
+   "id": "F13",
+   "what": "Streaming mode: scenes, cameras and other sources, the layout editor, the mixer, going live to several services",
+   "guards": [
+    {
+     "file": "tests/unit/PushStudioSourcesTests.cpp",
+     "ci": "veyra_push_studio_sources_tests"
+    },
+    {
+     "file": "tests/integration/LiveStreamTests.cpp",
+     "ci": "veyra_live_stream_tests"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_studio.qml",
+     "ci": "tst_push_studio"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_stream.qml",
+     "ci": "tst_push_stream"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_layout.qml",
+     "ci": "tst_push_layout"
+    }
+   ],
+   "needs_hardware": "A camera (none exists in CI) and the real services."
+  },
+  {
+   "id": "F14",
+   "what": "The OBS Studio plugin and the frame input API's layout, which other programs are built against",
+   "guards": [
+    {
+     "file": "obs-plugin/ci/obs-load-test.ps1",
+     "ci": "obs-load-test.ps1"
+    },
+    {
+     "file": "include/pushfps/FrameInput.h",
+     "contains": "4096"
+    }
+   ],
+   "needs_hardware": "OBS capturing a real session at 60 and 120 FPS."
+  },
+  {
+   "id": "F15",
+   "what": "Profiles, languages, appearance, saved preferences and what they default to",
+   "guards": [
+    {
+     "file": "tests/unit/UiLanguageTests.cpp",
+     "ci": "veyra_ui_i18n_tests"
+    },
+    {
+     "file": "scripts/i18n/extract.py",
+     "ci": "extract.py --check"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_appearance.qml",
+     "ci": "tst_push_appearance"
+    },
+    {
+     "file": "tests/qml/quick/tst_push_quick_setup.qml",
+     "ci": "tst_push_quick_setup"
+    }
+   ],
+   "needs_hardware": ""
+  },
+  {
+   "id": "F16",
+   "what": "The installer, optional extras, signed one-click updates, checksums, the ANR installer's safety",
+   "guards": [
+    {
+     "file": "tests/unit/UpdateCheckerTests.cpp",
+     "ci": "veyra_update_checker_tests"
+    },
+    {
+     "file": "tests/unit/UpdateVerifyTests.cpp",
+     "ci": "veyra_update_verify_tests"
+    },
+    {
+     "file": "tests/unit/PushArchivePathsTests.cpp",
+     "ci": "veyra_push_archive_paths_tests"
+    },
+    {
+     "file": "packaging/Install-PushFPS.ps1",
+     "ci": "Install-PushFPS.ps1"
+    }
+   ],
+   "needs_hardware": ""
+  },
+  {
+   "id": "F17",
+   "what": "More than one graphics card: which one is used, and never switching by itself",
+   "guards": [],
+   "needs_hardware": "Two adapters. No automated guard exists; a change here needs a tester with such a PC."
+  },
+  {
+   "id": "F18",
+   "what": "Everything else a user can reach: every main page opens without a QML error in the installed program",
+   "guards": [
+    {
+     "file": ".github/workflows/build-windows.yml",
+     "ci": "Install test",
+     "contains": "\\[ERROR\\] \\[qml\\]"
+    }
+   ],
+   "needs_hardware": ""
+  }
+ ]
+}

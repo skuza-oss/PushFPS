@@ -39,3 +39,7 @@ licenses/sdk/
 # User-authorized runtime music is distributed only in binary packages.
 startup-music.mp3
 BGM.MP3
+
+# Python byte code (written when a script imports another; never part of the source)
+__pycache__/
+*.pyc

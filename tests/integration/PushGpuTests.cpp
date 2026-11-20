@@ -20,7 +20,9 @@
 //    folder holding pushflow\ (the release's runtime), two identical frames give the same picture back,
 //    and a square that moves 16 px lands near the middle at t = 0.5, far closer than a blend of the two
 //    frames, in both tiers' models. Without the variable the test is skipped (and says so).
+#include "veyra/pushflow/PushFlowPredict.h"
 #include "veyra/pushflow/PushFlowBackend.h"
+#include "veyra/pushflow/PushFlowMotion.h"
 #include "veyra/engine/PushHudSampler.h"
 #include "veyra/pipeline/PushHudLock.h"
 #include "veyra/pipeline/PushAmbientPass.h"
@@ -264,13 +266,13 @@ void testCompare(Gpu& gpu) {
 // compose, read both back (tight rows).
 bool composeFrame(Gpu& gpu, engine::RecordingCompare& compare, pipeline::StateTracker& states, const Plane& y, const Plane& uv,
                   const std::vector<uint8_t>& yData, const std::vector<uint8_t>& uvData, bool generated,
-                  std::vector<uint8_t>& yOut, std::vector<uint8_t>& uvOut) {
+                  std::vector<uint8_t>& yOut, std::vector<uint8_t>& uvOut, double seconds = 0.0) {
     if (!gpu.begin()) return false;
     auto a = recordFill(gpu, y, yData, states.get(y.texture.Get()), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     states.set(y.texture.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     auto b = recordFill(gpu, uv, uvData, states.get(uv.texture.Get()), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     states.set(uv.texture.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    compare.compose(gpu.list.Get(), states, y.texture.Get(), uv.texture.Get(), generated);
+    compare.compose(gpu.list.Get(), states, y.texture.Get(), uv.texture.Get(), generated, nullptr, 0, seconds);
     auto ry = recordRead(gpu, y, states.get(y.texture.Get()));
     auto ruv = recordRead(gpu, uv, states.get(uv.texture.Get()));
     if (!gpu.submitAndWait()) return false;
@@ -795,6 +797,134 @@ void testCompareBadges(Gpu& gpu, bool hdr) {
     check(U(6, 4) == int(hdr ? (400 << 6) : 100), tag + ": chroma under a transparent badge pixel is kept");
     check(Y(30, 60) == int(hdr ? (300 << 6) : 50), tag + ": picture outside the badges unchanged");
     check(!gpu.debugErrors(), tag + ": no D3D12 debug errors");
+}
+
+// The Reveal layout: one whole picture, the console side uncovered and covered again by a sweeping
+// line. Checked frame by frame at chosen moments of the clip: what is left and right of the line,
+// the line itself, and the two badges, each cut off at the line with its picture.
+void testCompareReveal(Gpu& gpu, bool hdr) {
+    constexpr uint32_t W = 640, H = 360;
+    const std::string tag = std::string("reveal") + (hdr ? " HDR" : "");
+    auto* device = gpu.device.Get();
+    const auto yFormat = hdr ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
+    const auto uvFormat = hdr ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM;
+    const uint32_t bpp = hdr ? 2 : 1;
+    Plane y{pipeline::makeTexture(device, W, H, yFormat, true), yFormat, W, H, bpp};
+    Plane uv{pipeline::makeTexture(device, W / 2, H / 2, uvFormat, true), uvFormat, W / 2, H / 2, bpp * 2};
+    check(y.texture && uv.texture, tag + ": planes created");
+    // The console's badge: 48 x 8 opaque black. PushFPS's: 48 x 8 opaque white.
+    engine::RecordingLabel console{48, 8, {}, std::vector<uint8_t>(48 * 8 * 4, 0)}, push{48, 8, {}, std::vector<uint8_t>(48 * 8 * 4, 255)};
+    for (size_t i = 3; i < console.rgba.size(); i += 4) console.rgba[i] = 255;
+    engine::RecordingCompare compare;
+    std::wstring reason;
+    check(compare.create(device, W, H, hdr, console, push, reason, engine::CompareLayout::Reveal), tag + ": created");
+    compare.setRevealInterval(3.0);
+    const uint32_t lineW = compare.revealLineWidth();
+    check(compare.overlays().size() == 3 && compare.patches().empty(), tag + ": two badges and the line are blended, nothing is copied in (no fixed divider)");
+    check(lineW == engine::compareRevealLine(H).width && lineW == 32, tag + ": the line's strip, " + std::to_string(lineW) + " wide (the places checked below count on 32)");
+    check(compare.outputY() == nullptr, tag + ": composed on the recorder's own planes, at the picture's size");
+
+    pipeline::StateTracker states;
+    std::vector<uint8_t> py, puv;
+    const auto plane = [&](uint32_t v8, uint32_t v10, size_t count) {
+        return hdr ? words(std::vector<uint16_t>(count, uint16_t(v10 << 6))) : std::vector<uint8_t>(count, uint8_t(v8));
+    };
+    const auto read = [&](const std::vector<uint8_t>& bytes, size_t index) { return hdr ? int(word(bytes, index)) : int(bytes[index]); };
+    const auto Y = [&](uint32_t x, uint32_t yy) { return read(py, size_t(yy) * W + x); };
+    const auto U = [&](uint32_t x, uint32_t yy) { return read(puv, (size_t(yy) * (W / 2) + x) * 2); };
+    const auto code = [&](uint32_t v8, uint32_t v10) { return int(hdr ? (v10 << 6) : v8); };
+    const int tol = hdr ? 64 : 1;
+    const int white = code(235, 573), black = code(16, 64);
+    // Pictures (8-bit and 10-bit codes): real frames are dark with neutral colour, generated frames
+    // brighter with a colour of their own, so the cut shows in both planes.
+    const int realChroma = code(128, 512), madeChroma = code(160, 640);
+    const auto frame = [&](uint32_t luma8, uint32_t luma10, bool generated, double seconds) {
+        return composeFrame(gpu, compare, states, y, uv, plane(luma8, luma10, W * H),
+                            generated ? plane(160, 640, W / 2 * H / 2 * 2) : plane(128, 512, W / 2 * H / 2 * 2), generated, py, puv, seconds);
+    };
+    const int held = code(50, 300);
+    const double every = 3.0, sweep = engine::compareRevealSweepSeconds(every), hold = every - sweep;
+    // The moment the line's centre is at `x` during the first sweep (found by stepping through it).
+    const auto when = [&](int32_t x) {
+        for (double t = hold; t < every; t += 0.0002)
+            if (engine::compareRevealCentre(engine::compareRevealPosition(t, every), W, lineW) >= x) return t;
+        return every;
+    };
+    const uint32_t pushX = 10, consoleX = W - 10 - 48, badgeY = 12;   // margin 10: PushFPS top left, the console top right
+
+    // 1. The clip opens on the console side: a real frame is that picture, whole.
+    check(frame(50, 300, false, 0.0), tag + ": first real frame runs");
+    check(Y(5, 200) == held && Y(320, 200) == held && Y(634, 200) == held, tag + ": opens on the whole console picture");
+    check(compare.revealX() == 0 && !compare.revealLineShown(), tag + ": the line waits outside the picture");
+    check(std::abs(Y(consoleX + 4, badgeY) - black) <= tol && std::abs(Y(consoleX + 44, badgeY) - black) <= tol, tag + ": the console's badge at the top right");
+    check(Y(pushX + 4, badgeY) == held, tag + ": no PushFPS badge while none of its picture shows");
+    // 2. During the hold a generated frame does not show: the picture stays the console's.
+    check(frame(200, 800, true, 1.0), tag + ": generated frame during the hold runs");
+    check(Y(5, 200) == held && Y(320, 200) == held && Y(634, 200) == held, tag + ": the hold shows only the console's frames");
+    check(U(160, 100) == realChroma && U(4, 100) == realChroma, tag + ": in colour too");
+    // 3. Half way through the sweep: PushFPS left of the line, the console right of it.
+    const int made = code(200, 800);
+    check(frame(200, 800, true, hold + sweep / 2), tag + ": frame at the middle of the sweep runs");
+    std::printf("INFO %s mid: x=%u left=%d right=%d core=%d handle=%d\n", tag.c_str(), compare.revealX(), Y(100, 200), Y(540, 200), Y(320, 40), Y(320, 173));
+    check(compare.revealX() == W / 2 && compare.revealLineShown(), tag + ": the line is in the middle");
+    check(Y(100, 200) == made && Y(W / 2 - lineW / 2 - 2, 200) == made, tag + ": left of the line every presented frame");
+    check(Y(540, 200) == held && Y(W / 2 + lineW / 2 + 1, 200) == held, tag + ": right of the line the console's frame");
+    check(std::abs(Y(W / 2, 40) - white) <= tol && std::abs(Y(W / 2 - 1, 300) - white) <= tol, tag + ": the line's white core, top to bottom");
+    check(U(50, 100) == madeChroma && U(270, 100) == realChroma, tag + ": the colour planes are cut at the same place");
+    check(Y(W / 2 + 4, 40) > held && Y(W / 2 - 3, 40) != made, tag + ": a glow on both sides of the core");
+    check(U(W / 4 + 1, 20) < realChroma - code(5, 20), tag + ": and the glow is green (blue-difference below neutral)");
+    check(Y(W / 2, 173) < Y(W / 2, 40) / 2, tag + ": the handle's dark face in the middle of the height");
+    check(std::abs(Y(pushX + 4, badgeY) - white) <= tol && std::abs(Y(consoleX + 4, badgeY) - black) <= tol, tag + ": both badges while both pictures show");
+    // 4. The line crosses the PushFPS badge: only the part left of the line is drawn.
+    check(frame(200, 800, true, when(40)), tag + ": frame with the line over the PushFPS badge runs");
+    check(compare.revealX() == 40, tag + ": the line at x 40");
+    check(std::abs(Y(pushX + 2, badgeY) - white) <= tol && std::abs(Y(pushX + 10, badgeY) - white) <= tol, tag + ": the badge left of the line");
+    check(Y(pushX + 47, badgeY) == held && Y(pushX + 46, badgeY + 5) == held, tag + ": is cut off at the line: right of it the console's picture, no badge");
+    check(Y(5, 200) == made && Y(80, 200) == held, tag + ": and the picture is cut at the same x");
+    // 5. The line crosses the console's badge.
+    check(frame(200, 800, true, when(int32_t(consoleX) + 18)), tag + ": frame with the line over the console's badge runs");
+    check(compare.revealX() == consoleX + 18, tag + ": the line at the console's badge");
+    check(std::abs(Y(consoleX + 44, badgeY) - black) <= tol && std::abs(Y(consoleX + 36, badgeY + 5) - black) <= tol, tag + ": the console's badge right of the line");
+    check(Y(consoleX, badgeY) == made && Y(consoleX + 1, badgeY + 5) == made, tag + ": is cut off at the line: left of it PushFPS's picture");
+    // 6. The hold on PushFPS: every presented frame, whole, with its badge only.
+    check(frame(120, 500, true, every + hold / 2), tag + ": frame during the PushFPS hold runs");
+    const int next = code(120, 500);
+    check(compare.revealX() == W && !compare.revealLineShown(), tag + ": the line has left the picture on the right");
+    check(Y(5, 200) == next && Y(320, 200) == next && Y(634, 200) == next, tag + ": the whole picture is PushFPS's");
+    check(std::abs(Y(pushX + 4, badgeY) - white) <= tol && Y(consoleX + 4, badgeY) == next, tag + ": with the PushFPS badge and no console badge");
+    // A real frame arrives meanwhile: the console side follows, out of sight.
+    check(frame(70, 350, false, every + hold / 2 + 0.03), tag + ": real frame during the PushFPS hold runs");
+    check(Y(320, 200) == code(70, 350), tag + ": a real frame is presented too");
+    // 7. The sweep back: the console's newest frame comes in from the right.
+    check(frame(180, 700, true, every + hold + sweep / 2), tag + ": frame at the middle of the sweep back runs");
+    check(compare.revealX() == W / 2 && compare.revealLineShown(), tag + ": the line is in the middle again");
+    check(Y(100, 200) == code(180, 700) && Y(540, 200) == code(70, 350), tag + ": PushFPS left, the console's newest frame right");
+    // 8. And the console side holds again.
+    check(frame(210, 820, true, 2 * every + hold / 2), tag + ": frame of the second console hold runs");
+    check(compare.revealX() == 0 && Y(320, 200) == code(70, 350) && Y(5, 200) == code(70, 350), tag + ": back on the console side, whole");
+    check(compare.generatedFrames() == 7 && compare.realFrames() == 2, tag + ": counts frames");
+    // The line moves a little with every frame of a sweep: 30 frames at 120 a second, each further right.
+    bool forward = true;
+    uint32_t last = 0, distinct = 0;
+    for (int i = 0; i < 30 && forward; ++i) {
+        if (!frame(200, 800, true, 6 * every + hold + sweep / 4 + i / 120.0)) { forward = false; break; }
+        if (i && compare.revealX() < last) forward = false;
+        if (i && compare.revealX() > last) ++distinct;
+        if (i && Y(compare.revealX() > lineW ? compare.revealX() - lineW : 0, 200) != made && compare.revealX() > lineW) forward = false;
+        last = compare.revealX();
+    }
+    check(forward && distinct >= 28, tag + ": the line advances with every frame of a sweep (" + std::to_string(distinct) + " of 29 steps)");
+    check(!gpu.debugErrors(), tag + ": no D3D12 debug errors");
+
+    // Without labels the line still sweeps; without a line the picture is still cut.
+    engine::RecordingLabel nothing{};
+    engine::RecordingCompare bare;
+    check(bare.create(device, W, H, hdr, nothing, nothing, reason, engine::CompareLayout::Reveal) && bare.overlays().size() == 1 && bare.patches().empty(),
+          tag + ": no labels leaves only the line");
+    // The other layouts know nothing of the line.
+    engine::RecordingCompare split;
+    check(split.create(device, W, H, hdr, console, push, reason) && split.overlays().size() == 2 && split.patches().size() == 1 && split.revealLineWidth() == 0,
+          tag + ": the split layout keeps its two badges and its divider, and has no line");
 }
 
 void testCompareSkipRule() {
@@ -1369,13 +1499,18 @@ void testPushFlowRuntime(Gpu& gpu, const wchar_t* dir, bool strict) {
     Plane b{pipeline::makeTexture(device, W, H, fmt, false), fmt, W, H, 4};
     Plane out{pipeline::makeTexture(device, W, H, fmt, false), fmt, W, H, 4};
     checkOr(a.texture && b.texture && out.texture, "pushflow: textures created");
+    // What the next run() tells pack() besides the pictures: nothing, as every caller did before the
+    // encoder cache; its test sets the two frames' numbers and "the same pair again".
+    uint64_t packPrevious = 0, packCurrent = 0;
+    bool packTimeOnly = false;
+    float forecastAhead = -1.0f;   // 0..1: the run ends in PushFlow 2's forecast for that time after `pb`, not in resolve()
     const auto run = [&](const std::vector<uint8_t>& pa, const std::vector<uint8_t>& pb, float t, pushflow::PushFlowBackend& flow, double* ms) {
         std::vector<uint8_t> result;
         if (!gpu.begin()) return result;
         auto ua = recordFill(gpu, a, pa, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         auto ub = recordFill(gpu, b, pb, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         // Wait for the pack list before resetting the allocator for the next one.
-        if (!flow.pack(gpu.list.Get(), a.texture.Get(), b.texture.Get(), t) || !gpu.submitAndWait()) return result;
+        if (!flow.pack(gpu.list.Get(), a.texture.Get(), b.texture.Get(), t, packTimeOnly, packPrevious, packCurrent) || !gpu.submitAndWait()) return result;
         const auto start = std::chrono::steady_clock::now();
         if (!flow.infer()) return result;
         if (!gpu.begin()) return result;
@@ -1383,7 +1518,8 @@ void testPushFlowRuntime(Gpu& gpu, const wchar_t* dir, bool strict) {
         bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         bar.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON; bar.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
         gpu.list->ResourceBarrier(1, &bar);
-        if (!flow.resolve(gpu.list.Get(), a.texture.Get(), b.texture.Get(), out.texture.Get())) return result;
+        if (forecastAhead >= 0.0f ? !flow.forecast(gpu.list.Get(), a.texture.Get(), b.texture.Get(), out.texture.Get(), forecastAhead)
+                                  : !flow.resolve(gpu.list.Get(), a.texture.Get(), b.texture.Get(), out.texture.Get())) return result;
         auto rb = recordRead(gpu, out, D3D12_RESOURCE_STATE_COPY_DEST);
         bar.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST; bar.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
         gpu.list->ResourceBarrier(1, &bar);
@@ -1454,10 +1590,360 @@ void testPushFlowRuntime(Gpu& gpu, const wchar_t* dir, bool strict) {
         if (tier == 0) checkOr(!detail.empty() && detailDb > detailBlendDb + 2.0, detailText);
         else std::printf("INFO %s\n", detailText.c_str());
         if (tier == 0) checkOr(flow.status().rebuild, "pushflow: the Fast tier rebuilds at full size");
+        // The full-size rebuild against its reference (pushflow/PushFlowMotion.h), pixel by pixel, from
+        // the network's own grids and mask of the same run. The checks above judge the picture by how close
+        // it comes to a drawn truth; this one says the shader does exactly what the contract says, on
+        // every pair, whatever the network made of it.
+        if (flow.status().grids) {
+            using pushflow::motion::reference::Rgb;
+            using pushflow::motion::reference::Vec2;
+            const auto st = flow.status();
+            const pushflow::motion::Geometry geo{W, H, st.modelW, st.modelH, st.padW, st.padH, st.alignCorners, st.maskForFirst};
+            const uint64_t plane = uint64_t(st.padW) * st.padH;
+            const auto moved96 = flowFrame(W, H, 196), other = detailFrame(W, H, 0);
+            struct Pair { const char* name; const std::vector<uint8_t>* a; const std::vector<uint8_t>* b; float t; };
+            const Pair pairs[] = {{"a square moved 16 pixels", &first, &second, 0.5f}, {"a square moved 96 pixels", &first, &moved96, 0.5f},
+                                  {"a square moved 96 pixels, at three quarters", &first, &moved96, 0.75f}, {"fine texture panned 8 pixels", &d0, &d1, 0.5f},
+                                  {"two unrelated pictures", &first, &other, 0.5f}};
+            for (const Pair& pair : pairs) {
+                const auto picture = run(*pair.a, *pair.b, pair.t, flow, nullptr);
+                const auto g0 = readFloats(gpu, flow.motionBuffer(0), plane * 2), g1 = readFloats(gpu, flow.motionBuffer(1), plane * 2), mk = readFloats(gpu, flow.motionBuffer(2), plane);
+                const bool ran = !picture.empty() && !g0.empty() && !g1.empty() && !mk.empty();
+                int worst = 255; double mean = 255;
+                if (ran) {
+                    const uint32_t width = W, padW = st.padW;
+                    const auto frame = [width](const std::vector<uint8_t>& px) {
+                        const uint8_t* data = px.data();
+                        return [data, width](uint32_t x, uint32_t y) { const uint8_t* q = data + (size_t(y) * width + x) * 4; return Rgb{q[0] / 255.0f, q[1] / 255.0f, q[2] / 255.0f}; };
+                    };
+                    const auto grid = [padW](const std::vector<float>& g) {
+                        const float* data = g.data();
+                        return [data, padW](uint32_t x, uint32_t y) { const size_t i = (size_t(y) * padW + x) * 2; return Vec2{data[i], data[i + 1]}; };
+                    };
+                    const float* maskData = mk.data();
+                    const auto maskAt = [maskData, padW](uint32_t x, uint32_t y) { return maskData[size_t(y) * padW + x]; };
+                    double sum = 0; worst = 0;
+                    for (uint32_t y = 0; y < H; ++y)
+                        for (uint32_t x = 0; x < W; ++x) {
+                            const Rgb px = pushflow::motion::reference::rebuild(geo, x, y, frame(*pair.a), frame(*pair.b), grid(g0), grid(g1), maskAt);
+                            const float want[3] = {px.r, px.g, px.b};
+                            for (int k = 0; k < 3; ++k) {
+                                const int d = std::abs(int(picture[(size_t(y) * W + x) * 4 + k]) - int(std::clamp(want[k], 0.0f, 1.0f) * 255.0f + 0.5f));
+                                worst = std::max(worst, d); sum += d;
+                            }
+                        }
+                    mean = sum / (3.0 * W * H);
+                }
+                const std::string text = std::format("pushflow: tier {} {}: the picture is the reference rebuild of the network's grids and mask (worst {} of 255, mean {:.3f})",
+                    tier, pair.name, worst, mean);
+                // At full size the network's own picture is shown, not the rebuild: how close the two are
+                // is reported (the model script checks that on the CPU), the shader is checked where it runs.
+                if (st.rebuild) checkOr(ran && worst <= 2 && mean < 0.3, text);
+                else std::printf("INFO %s (the network's own picture; the rebuild is not used at this size)\n", text.c_str());
+            }
+        } else {
+            std::printf("INFO pushflow: tier %u model has no grids: nothing to rebuild from\n", tier);
+        }
         const auto tel = flow.telemetry();
         checkOr(tel.inferences > 0 && tel.inferP50Ms > 0, std::format("pushflow: telemetry ({} inferences, p50 {:.1f} ms)", tel.inferences, tel.inferP50Ms));
         checkOr(!gpu.debugErrors(), "pushflow: no debug layer errors");
     }
+    // A motion size chosen apart from the tier (3.2.7; pushflow/PushFlowMotion.h). At this picture size the
+    // Fast tier's own network is half the picture and any chosen size is the whole picture (a picture is
+    // never enlarged), which is exactly what the Balanced tier runs here with the same model: the two
+    // must give the same picture. A chosen size at the Quality tier changes nothing here.
+    {
+        const auto first = flowFrame(W, H, 100), second = flowFrame(W, H, 116);
+        std::vector<uint8_t> chosenPicture, balancedPicture;
+        uint32_t chosenW = 0, chosenH = 0, ownW = 0, ownH = 0; bool chosenRebuild = true, ownRebuild = false, started = true;
+        {
+            pushflow::PushFlowBackend own;
+            started = own.initialize(device, gpu.queue.Get(), dir, W, H, fmt, pushflow::Encoding::Encoded, 0);
+            if (started) { ownW = own.status().modelW; ownH = own.status().modelH; ownRebuild = own.status().rebuild; }
+        }
+        {
+            pushflow::PushFlowBackend chosen;
+            started = started && chosen.initialize(device, gpu.queue.Get(), dir, W, H, fmt, pushflow::Encoding::Encoded, 0, 540);
+            if (started) { chosenW = chosen.status().modelW; chosenH = chosen.status().modelH; chosenRebuild = chosen.status().rebuild; chosenPicture = run(first, second, 0.5f, chosen, nullptr); }
+        }
+        {
+            pushflow::PushFlowBackend balanced;
+            started = started && balanced.initialize(device, gpu.queue.Get(), dir, W, H, fmt, pushflow::Encoding::Encoded, 1);
+            if (started) balancedPicture = run(first, second, 0.5f, balanced, nullptr);
+        }
+        checkOr(started, "pushflow motion size: Fast, Fast at a chosen size and Balanced all start");
+        if (started) {
+            checkOr(ownW == W / 2 && ownH == H / 2 && ownRebuild, std::format("pushflow motion size: Fast's own size is what it was ({}x{}, rebuilt at full size)", ownW, ownH));
+            checkOr(chosenW == W && chosenH == H && !chosenRebuild, std::format("pushflow motion size: a chosen size is used at the Fast tier, as far as the picture goes ({}x{})", chosenW, chosenH));
+            int worst = 255; double mean = 0;
+            if (chosenPicture.size() == balancedPicture.size() && !chosenPicture.empty()) {
+                worst = 0;
+                for (size_t i = 0; i < chosenPicture.size(); ++i) { const int d = std::abs(int(chosenPicture[i]) - int(balancedPicture[i])); worst = std::max(worst, d); mean += d; }
+                mean /= double(chosenPicture.size());
+            }
+            checkOr(worst <= 1, std::format("pushflow motion size: Fast at the picture's size gives the picture Balanced gives here, the same model at the same size (worst {} of 255, mean {:.4f})", worst, mean));
+        }
+        {
+            // One after the other: PushFPS never has two PushFlow sessions at once, so neither does the test.
+            pushflow::Status quality, qualityChosen; bool both = true;
+            for (int lines : {0, 720}) {
+                pushflow::PushFlowBackend flow;
+                const bool ready = flow.initialize(device, gpu.queue.Get(), dir, W, H, fmt, pushflow::Encoding::Encoded, 2, lines);
+                if (ready) (lines ? qualityChosen : quality) = flow.status();
+                both = both && ready;
+            }
+            checkOr(both && quality.modelW == W && quality.modelW == qualityChosen.modelW && quality.modelH == qualityChosen.modelH &&
+                    !quality.model.empty() && quality.model == qualityChosen.model && quality.model.find("quality") != std::string::npos,
+                    "pushflow motion size: on a picture smaller than the chosen size nothing changes, and the tier still chooses the model");
+        }
+        checkOr(!gpu.debugErrors(), "pushflow motion size: no debug layer errors");
+    }
+    // PushFlow 2's encoder cache (opt-in; docs/PUSHFLOW2.md): each real frame encoded once, its features
+    // kept for the pair after it. Whatever it keeps or makes anew, the picture must be the whole model's.
+    for (uint32_t tier : {0u, 2u}) {
+        const std::string tag = "pushflow encoder cache, tier " + std::to_string(tier);
+        const std::vector<uint8_t> frames[4] = {flowFrame(W, H, 100), flowFrame(W, H, 116), flowFrame(W, H, 132), flowFrame(W, H, 148)};
+        const auto apart = [](const std::vector<uint8_t>& x, const std::vector<uint8_t>& y) {
+            if (x.empty() || x.size() != y.size()) return 255;
+            int worst = 0;
+            for (size_t i = 0; i < x.size(); ++i) worst = std::max(worst, std::abs(int(x[i]) - int(y[i])));
+            return worst;
+        };
+        packPrevious = packCurrent = 0; packTimeOnly = false;
+        std::vector<uint8_t> want01, want12, want12late, want23;
+        {
+            pushflow::PushFlowBackend whole;
+            if (whole.initialize(device, gpu.queue.Get(), dir, W, H, fmt, pushflow::Encoding::Encoded, tier)) {
+                want01 = run(frames[0], frames[1], 0.5f, whole, nullptr);
+                want12 = run(frames[1], frames[2], 0.5f, whole, nullptr);
+                want12late = run(frames[1], frames[2], 0.75f, whole, nullptr);
+                want23 = run(frames[2], frames[3], 0.5f, whole, nullptr);
+                checkOr(whole.status().splitState.empty() && !whole.status().split && whole.telemetry().encoderRuns == 0, tag + ": not asked for, nothing of it runs");
+            }
+        }
+        checkOr(!want01.empty() && !want12.empty() && !want12late.empty() && !want23.empty(), tag + ": the whole model's pictures to compare with");
+        pushflow::PushFlowBackend cached;
+        const bool ready = cached.initialize(device, gpu.queue.Get(), dir, W, H, fmt, pushflow::Encoding::Encoded, tier, 0, true);
+        checkOr(ready, tag + ": PushFlow starts with the cache asked for");
+        if (!ready) continue;
+        const auto st = cached.status();
+        std::printf("INFO %s: state '%s', start-up check %.1f dB, one frame whole %.1f ms, split %.1f ms\n", tag.c_str(), st.splitState.c_str(), st.splitCheckDb, st.wholeMs, st.splitMs);
+        checkOr(st.split && st.splitState == "on" && st.splitCheckDb >= 50.0, tag + ": the split models are in use after matching the whole model at start");
+        if (!st.split) continue;
+        checkOr(cached.telemetry().encoderRuns == 0 && cached.telemetry().featureHits == 0, tag + ": the start-up check leaves no count and nothing kept behind");
+        // A first pair: nothing kept, both frames encoded.
+        packPrevious = 1; packCurrent = 2;
+        const auto got01 = run(frames[0], frames[1], 0.5f, cached, nullptr);
+        // The pair after it: its first frame's features are the ones just kept.
+        packPrevious = 2; packCurrent = 3;
+        const auto got12 = run(frames[1], frames[2], 0.5f, cached, nullptr);
+        // The same pair at another time (3X and 4X): the rest of the model alone.
+        packTimeOnly = true;
+        const auto got12late = run(frames[1], frames[2], 0.75f, cached, nullptr);
+        packTimeOnly = false;
+        auto tel = cached.telemetry();
+        checkOr(tel.featureMisses == 1 && tel.featureHits == 1 && tel.encoderRuns == 3,
+                std::format("{}: two pairs and a second time cost three encoder runs, one frame's features kept (runs {}, kept {}, made {})", tag, tel.encoderRuns, tel.featureHits, tel.featureMisses));
+        checkOr(apart(got01, want01) <= 1 && apart(got12, want12) <= 1 && apart(got12late, want12late) <= 1,
+                std::format("{}: the pictures are the whole model's (worst of 255: first pair {}, kept features {}, second time {})", tag, apart(got01, want01), apart(got12, want12), apart(got12late, want12late)));
+        // Frames whose numbers are not known: nothing kept may be used.
+        packPrevious = packCurrent = 0;
+        const auto got23 = run(frames[2], frames[3], 0.5f, cached, nullptr);
+        // A pair that does not follow the one before (a pair was skipped): made anew.
+        packPrevious = 7; packCurrent = 8;
+        const auto got01again = run(frames[0], frames[1], 0.5f, cached, nullptr);
+        // And one whose first frame carries an old number that is no longer kept anywhere.
+        packPrevious = 2; packCurrent = 9;
+        const auto got12again = run(frames[1], frames[2], 0.5f, cached, nullptr);
+        packPrevious = packCurrent = 0;
+        tel = cached.telemetry();
+        checkOr(tel.featureMisses == 4 && tel.featureHits == 1 && tel.encoderRuns == 9,
+                std::format("{}: unknown, skipped and outdated frames are encoded again, never taken from what was kept (runs {}, kept {}, made {})", tag, tel.encoderRuns, tel.featureHits, tel.featureMisses));
+        checkOr(apart(got23, want23) <= 1 && apart(got01again, want01) <= 1 && apart(got12again, want12) <= 1,
+                std::format("{}: and their pictures are the whole model's too (worst of 255: {}, {}, {})", tag, apart(got23, want23), apart(got01again, want01), apart(got12again, want12)));
+        checkOr(cached.status().split, tag + ": still in use after every case");
+        checkOr(!gpu.debugErrors(), tag + ": no debug layer errors");
+    }
+    // PushFlow 2's Guard (opt-in; shaders/PushGuard.hlsl, docs/PUSHFLOW2.md): where an object was left out
+    // of the generated frame, the nearer real frame; everywhere else, and always when nothing is wrong,
+    // the generated frame exactly as it is without Guard.
+    // Three runs: the Quality model, the Fast tier at its own motion size (half this small picture: 8 x 5
+    // tiles, where the edge band leaves almost nothing to judge), and the Fast tier's model at the whole
+    // picture's size, so that both models are seen acting.
+    struct GuardRun { uint32_t tier; int motion; };
+    for (const GuardRun guardRun : {GuardRun{2u, 0}, GuardRun{0u, 0}, GuardRun{0u, 540}}) {
+        const uint32_t tier = guardRun.tier;
+        const std::string tag = "pushflow guard, tier " + std::to_string(tier) + (guardRun.motion ? " at a chosen motion size" : "");
+        const auto still = flowFrame(W, H, 90), near16 = flowFrame(W, H, 106), far120 = flowFrame(W, H, 210), other = detailFrame(W, H, 0);
+        const auto apart = [](const std::vector<uint8_t>& x, const std::vector<uint8_t>& y) {
+            if (x.empty() || x.size() != y.size()) return 255;
+            int worst = 0;
+            for (size_t i = 0; i < x.size(); ++i) worst = std::max(worst, std::abs(int(x[i]) - int(y[i])));
+            return worst;
+        };
+        // Mean difference inside the square's place in the earlier frame (x 90..130, y from 35 % down, 40 high).
+        const auto oldPlace = [&](const std::vector<uint8_t>& x, const std::vector<uint8_t>& y) {
+            if (x.empty() || x.size() != y.size()) return 255.0;
+            double sum = 0; int n = 0;
+            for (uint32_t py = uint32_t(H * 0.35) + 4; py < uint32_t(H * 0.35) + 36; ++py)
+                for (uint32_t px = 94; px < 126; ++px)
+                    for (int c = 0; c < 3; ++c) { sum += std::abs(int(x[(size_t(py) * W + px) * 4 + c]) - int(y[(size_t(py) * W + px) * 4 + c])); ++n; }
+            return sum / n;
+        };
+        packPrevious = packCurrent = 0; packTimeOnly = false;
+        std::vector<uint8_t> plainStill, plainNear, plainFar;
+        {
+            pushflow::PushFlowBackend plain;
+            if (plain.initialize(device, gpu.queue.Get(), dir, W, H, fmt, pushflow::Encoding::Encoded, tier, guardRun.motion)) {
+                plainStill = run(still, still, 0.5f, plain, nullptr);
+                plainNear = run(still, near16, 0.5f, plain, nullptr);
+                plainFar = run(still, far120, 0.5f, plain, nullptr);
+                checkOr(plain.status().guardState.empty() && !plain.status().guard && plain.telemetry().guardFrames == 0, tag + ": not asked for, nothing of it runs");
+            }
+        }
+        checkOr(!plainStill.empty() && !plainNear.empty() && !plainFar.empty(), tag + ": PushFlow's own pictures to compare with");
+        pushflow::PushFlowBackend guarded;
+        const bool ready = guarded.initialize(device, gpu.queue.Get(), dir, W, H, fmt, pushflow::Encoding::Encoded, tier, guardRun.motion, false, true);
+        checkOr(ready, tag + ": PushFlow starts with Guard asked for");
+        if (!ready) continue;
+        std::printf("INFO %s: state '%s', network %ux%u\n", tag.c_str(), guarded.status().guardState.c_str(), guarded.status().modelW, guarded.status().modelH);
+        checkOr(guarded.status().guard && guarded.status().guardState == "on", tag + ": Guard is in use");
+        if (!guarded.status().guard) continue;
+        const auto gotStill = run(still, still, 0.5f, guarded, nullptr);
+        const auto gotNear = run(still, near16, 0.5f, guarded, nullptr);
+        checkOr(apart(gotStill, plainStill) == 0 && apart(gotNear, plainNear) == 0,
+                std::format("{}: a still picture and a followed object come out exactly as without Guard (worst of 255: {}, {})", tag, apart(gotStill, plainStill), apart(gotNear, plainNear)));
+        // An object moved too far to follow: without Guard its old place shows background; with it, the earlier frame's object.
+        const auto gotFar = run(still, far120, 0.5f, guarded, nullptr);
+        const double without = oldPlace(plainFar, still), with = oldPlace(gotFar, still);
+        std::printf("INFO %s: object moved 120 px: its old place differs from the earlier frame by %.1f of 255 without Guard, %.1f with it\n", tag.c_str(), without, with);
+        checkOr(with <= without + 0.5, tag + ": Guard never takes the old place further from the earlier frame");
+        // Reported, not required: how far the rule goes on this small picture depends on the model (the
+        // measurements that decide the rule are prepare_runtime.py's, on larger pictures).
+        std::printf("INFO %s: the object PushFlow left out is %s where the earlier frame has it\n", tag.c_str(), without > 30.0 && with < without / 3.0 ? "shown" : "not (fully) shown");
+        // Two unrelated pictures: where more than a third is risky, the nearer real frame whole (at the
+        // middle time the earlier one, past it the later one).
+        const auto gotCut = run(still, other, 0.5f, guarded, nullptr);
+        const auto gotCutLate = run(still, other, 0.75f, guarded, nullptr);
+        std::printf("INFO %s: two unrelated pictures: worst difference from the earlier frame %d of 255 at the middle, from the later frame %d past it\n", tag.c_str(),
+                    apart(gotCut, still), apart(gotCutLate, other));
+        // A few more frames so that the totals of the ones above have come back.
+        for (int i = 0; i < 4; ++i) run(still, still, 0.5f, guarded, nullptr);
+        const auto tel = guarded.telemetry();
+        std::printf("INFO %s: judged %llu frames, mended %llu, held %llu, tiles %llu\n", tag.c_str(), static_cast<unsigned long long>(tel.guardFrames),
+                    static_cast<unsigned long long>(tel.guardMended), static_cast<unsigned long long>(tel.guardHeld), static_cast<unsigned long long>(tel.guardTiles));
+        checkOr(tel.guardFrames >= 5 && tel.guardMended + tel.guardHeld <= tel.guardFrames, tag + ": the frames it judged are counted, and never more mended or held than judged");
+        checkOr(!gpu.debugErrors(), tag + ": no debug layer errors");
+    }
+    // PushFlow 2's Predict (opt-in; shaders/PushPredict.hlsl, pushflow/PushFlowPredict.h): a frame for a
+    // time after the newest real frame, from the half-way grids. The shader is compared with the header's
+    // rule pixel by pixel from the network's own grids; a still picture must stay exact; and an in-between
+    // frame from the same PushFlow must be what it is without Predict (it steps aside for measurements).
+    for (const GuardRun predictRun : {GuardRun{2u, 0}, GuardRun{0u, 540}}) {
+        using pushflow::motion::reference::Rgb;
+        using pushflow::motion::reference::Vec2;
+        const uint32_t tier = predictRun.tier;
+        const std::string tag = "pushflow predict, tier " + std::to_string(tier) + (predictRun.motion ? " at a chosen motion size" : "");
+        const auto older = flowFrame(W, H, 100), newer = flowFrame(W, H, 104), later = flowFrame(W, H, 106), far16 = flowFrame(W, H, 116), other = detailFrame(W, H, 0);
+        const auto t0 = detailFrame(W, H, 0), t1 = detailFrame(W, H, 4);
+        const auto apart = [](const std::vector<uint8_t>& x, const std::vector<uint8_t>& y) {
+            if (x.empty() || x.size() != y.size()) return 255;
+            int worst = 0;
+            for (size_t i = 0; i < x.size(); ++i) worst = std::max(worst, std::abs(int(x[i]) - int(y[i])));
+            return worst;
+        };
+        const auto meanApart = [](const std::vector<uint8_t>& x, const std::vector<uint8_t>& y) {
+            if (x.empty() || x.size() != y.size()) return 255.0;
+            double sum = 0;
+            for (size_t i = 0; i < x.size(); ++i) sum += std::abs(int(x[i]) - int(y[i]));
+            return sum / double(x.size());
+        };
+        packPrevious = packCurrent = 0; packTimeOnly = false; forecastAhead = -1.0f;
+        std::vector<uint8_t> plainBetween;
+        {
+            pushflow::PushFlowBackend plain;
+            if (plain.initialize(device, gpu.queue.Get(), dir, W, H, fmt, pushflow::Encoding::Encoded, tier, predictRun.motion)) {
+                plainBetween = run(older, far16, 0.5f, plain, nullptr);
+                checkOr(plain.status().predictState.empty() && !plain.status().predict && plain.telemetry().predictFrames == 0, tag + ": not asked for, nothing of it runs");
+            }
+        }
+        pushflow::PushFlowBackend flow;
+        const bool ready = flow.initialize(device, gpu.queue.Get(), dir, W, H, fmt, pushflow::Encoding::Encoded, tier, predictRun.motion, false, false, true);
+        checkOr(ready, tag + ": PushFlow starts with Predict asked for");
+        if (!ready) continue;
+        checkOr(flow.status().predict && flow.status().predictState == "on", tag + ": Predict is in use ('" + flow.status().predictState + "')");
+        if (!flow.status().predict) continue;
+        const auto st = flow.status();
+        const pushflow::motion::Geometry geo{W, H, st.modelW, st.modelH, st.padW, st.padH, st.alignCorners, st.maskForFirst};
+        const uint64_t plane = uint64_t(st.padW) * st.padH;
+        // An in-between frame from this PushFlow is exactly PushFlow's own.
+        checkOr(!plainBetween.empty() && apart(run(older, far16, 0.5f, flow, nullptr), plainBetween) == 0, tag + ": an in-between frame is still exactly PushFlow's own");
+        // Nothing moves: the forecast is the newest frame, exactly.
+        forecastAhead = 0.5f;
+        const auto stillForecast = run(older, older, 0.5f, flow, nullptr);
+        checkOr(apart(stillForecast, older) == 0, std::format("{}: a still picture's forecast is the picture itself (worst of 255: {})", tag, apart(stillForecast, older)));
+        // The shader against the rule, from the network's own grids.
+        struct Pair { const char* name; const std::vector<uint8_t>* a; const std::vector<uint8_t>* b; float ahead; };
+        const Pair pairs[] = {{"a square moving 4 pixels a frame, half an interval ahead", &older, &newer, 0.5f}, {"the same, a quarter ahead", &older, &newer, 0.25f},
+                              {"a square moving 16 pixels a frame, three quarters ahead", &older, &far16, 0.75f}, {"fine texture panning 4 pixels a frame", &t0, &t1, 0.5f},
+                              {"two unrelated pictures", &older, &other, 0.5f}};
+        for (const Pair& pair : pairs) {
+            forecastAhead = pair.ahead;
+            const auto picture = run(*pair.a, *pair.b, 0.5f, flow, nullptr);
+            const auto g0 = readFloats(gpu, flow.motionBuffer(0), plane * 2), g1 = readFloats(gpu, flow.motionBuffer(1), plane * 2);
+            const bool ran = !picture.empty() && !g0.empty() && !g1.empty();
+            int worst = 255; double mean = 255, off = 100, heldShare = 0;
+            if (ran) {
+                const uint32_t width = W, padW = st.padW;
+                const auto frame = [width](const std::vector<uint8_t>& px) {
+                    const uint8_t* data = px.data();
+                    return [data, width](uint32_t x, uint32_t y) { const uint8_t* q = data + (size_t(y) * width + x) * 4; return Rgb{q[0] / 255.0f, q[1] / 255.0f, q[2] / 255.0f}; };
+                };
+                const auto grid = [padW](const std::vector<float>& g) {
+                    const float* data = g.data();
+                    return [data, padW](uint32_t x, uint32_t y) { const size_t i = (size_t(y) * padW + x) * 2; return Vec2{data[i], data[i + 1]}; };
+                };
+                double sum = 0; uint64_t beyond = 0, held = 0, moving = 0; worst = 0;
+                for (uint32_t y = 0; y < H; ++y)
+                    for (uint32_t x = 0; x < W; ++x) {
+                        const auto px = pushflow::predict::forecast(geo, x, y, pair.ahead, frame(*pair.b), frame(*pair.a), frame(*pair.b), grid(g0), grid(g1));
+                        const float want[3] = {px.colour.r, px.colour.g, px.colour.b};
+                        int here = 0;
+                        for (int k = 0; k < 3; ++k) here = std::max(here, std::abs(int(picture[(size_t(y) * W + x) * 4 + k]) - int(std::clamp(want[k], 0.0f, 1.0f) * 255.0f + 0.5f)));
+                        worst = std::max(worst, here); sum += here; beyond += here > 2;
+                        moving += px.moved >= pushflow::predict::kStill[1]; held += px.held;
+                    }
+                mean = sum / double(W * H); off = 100.0 * double(beyond) / double(W * H);
+                heldShare = moving ? 100.0 * double(held) / double(moving) : 0.0;
+            }
+            // A threshold (the picture's edge, the still zone) can fall the other way for a pixel whose value sits on it:
+            // the mean and the share of pixels that differ say whether the shader follows the rule.
+            checkOr(ran && mean < 0.3 && off < 0.5, std::format("{} {}: the picture is the rule's, from the network's own grids (mean {:.3f} of 255, {:.2f} % of pixels off by more than 2, worst {})",
+                                                               tag, pair.name, mean, off, worst));
+            std::printf("INFO %s %s: %.1f %% of the moving picture held\n", tag.c_str(), pair.name, heldShare);
+        }
+        // A square that keeps moving: the forecast is nearer to where it really is later than the newest frame is.
+        forecastAhead = 0.5f;
+        const auto ahead = run(older, newer, 0.5f, flow, nullptr);
+        const double forecastOff = meanApart(ahead, later), holdOff = meanApart(newer, later);
+        std::printf("INFO %s: a square moving 4 px a frame, half an interval on: the forecast is %.3f of 255 from the truth, the newest frame %.3f\n", tag.c_str(), forecastOff, holdOff);
+        // The Fast tier's model follows a small object on a picture this small poorly and holds most of it:
+        // level with holding (measured 1.7 % further, 19 November 2026), which is what the rule is for.
+        checkOr(forecastOff <= holdOff * 1.05 + 0.02, tag + ": a forecast is no further from the true later frame than holding the newest frame (within a twentieth)");
+        if (tier == 2) checkOr(forecastOff < holdOff * 0.7, tag + ": and for a slow, followed object it is clearly nearer");
+        // Across a cut most of the picture is held: the forecast stays near the newest frame.
+        const auto cut = run(older, other, 0.5f, flow, nullptr);
+        std::printf("INFO %s: two unrelated pictures: the forecast is %.2f of 255 from the newest frame on average (worst %d)\n", tag.c_str(), meanApart(cut, other), apart(cut, other));
+        for (int i = 0; i < 4; ++i) run(older, newer, 0.5f, flow, nullptr);
+        forecastAhead = -1.0f;
+        const auto tel = flow.telemetry();
+        std::printf("INFO %s: %llu forecasts counted, %llu pixels counted, %llu moving, %llu held\n", tag.c_str(), static_cast<unsigned long long>(tel.predictFrames),
+                    static_cast<unsigned long long>(tel.predictCounted), static_cast<unsigned long long>(tel.predictMoving), static_cast<unsigned long long>(tel.predictHeld));
+        checkOr(tel.predictFrames >= 5 && tel.predictCounted >= tel.predictFrames && tel.predictMoving <= tel.predictCounted && tel.predictHeld <= tel.predictMoving,
+                tag + ": the forecasts and their pixels are counted, never more held than moving");
+        checkOr(!gpu.debugErrors(), tag + ": no debug layer errors");
+    }
+    forecastAhead = -1.0f;
     checkOr(!pushflow::crashedLastTime(), "pushflow: the crash marker is gone after a normal close");
 }
 
@@ -1483,6 +1969,8 @@ int main() {
     testCompareRaw(gpu, false, engine::CompareLayout::SideBySide);
     testCompareBadges(gpu, false);
     testCompareBadges(gpu, true);
+    testCompareReveal(gpu, false);
+    testCompareReveal(gpu, true);
     testHudSampler(gpu);
     testHudLock(gpu);
     testAmbient(gpu);

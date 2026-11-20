@@ -3,7 +3,7 @@
 // Copyright (C) 2026 DosukaSOL and the PushFPS contributors. Part of PushFPS, a modified version of Veyra.
 //
 // PushFPS before/after comparison clips. A comparison recording is a normal
-// live recording (LiveRecorder.h) in one of two layouts.
+// live recording (LiveRecorder.h) in one of four layouts.
 // Split (CompareLayout::Split): the picture is split down the middle:
 //  - the right half is every presented frame, generated ones included (what
 //    PushFPS shows, with every enhancement);
@@ -19,6 +19,12 @@
 // frame, cropped to 9:8 and scaled with a smooth filter,
 // shaders/PushCompareVertical.hlsl); the labels sit next to the divider in
 // the middle, the part of the screen those apps leave free.
+// Reveal (CompareLayout::Reveal, RecordingComparePlan.h): the whole picture, no
+// split. It opens on the console side; a glowing line sweeps left to right and
+// uncovers every presented frame, holds, sweeps back, and repeats. Left of the
+// line is PushFPS, right of it the console, so the PushFPS badge sits at the top
+// left and the console's at the top right, each cut off at the line with its
+// picture. The line and the badges are blended in (PushCompareOverlay.hlsl).
 //
 // The console side is the raw console picture when the presenter passes it
 // (RecordingRawFrame: the graph's untouched copy of the input, kept while a
@@ -33,6 +39,8 @@
 // white is written at 203 nits, the HDR reference white. A label too large for
 // its place is scaled down to fit, never left out.
 // tests/integration/PushGpuTests.cpp runs all of it on WARP.
+#include "veyra/engine/RecordingComparePlan.h"
+
 #include <d3d12.h>
 #include <wrl/client.h>
 
@@ -47,15 +55,7 @@ namespace veyra::pipeline { class StateTracker; }
 
 namespace veyra::engine {
 
-// A label. luma: full-range grey levels (255 white, 0 black), copied in as
-// limited-range luma with neutral colour. rgba (preferred when present):
-// straight-alpha sRGB RGBA8, blended onto the picture. Width and height are
-// rounded down to even numbers when placed.
-struct RecordingLabel {
-    uint32_t width = 0, height = 0;
-    std::vector<uint8_t> luma;
-    std::vector<uint8_t> rgba;
-};
+// (RecordingLabel and CompareLayout are in RecordingComparePlan.h, which has no Windows headers.)
 // The label resampled (area average; colour weighted by alpha) to width x height.
 RecordingLabel scaleRecordingLabel(const RecordingLabel& label, uint32_t width, uint32_t height);
 // Called once per recording file on the engine thread with the recorded size.
@@ -69,8 +69,6 @@ struct RecordingRawFrame {
     ID3D12Resource* texture = nullptr;
     bool sdrInHdr = false;
 };
-
-enum class CompareLayout : uint32_t { Split = 0, SideBySide = 1, Vertical = 2 };
 
 // The recorded (encoded) size of a comparison clip for a presented frame of frameW x frameH:
 // the frame's own size, except Vertical: always 1080 x 1920, the size the short-video apps use.
@@ -120,8 +118,16 @@ public:
     // layout, then the divider and labels. `states` tracks y, uv and this
     // object's textures. `slot` is the recorder's frame slot: a descriptor for
     // `raw` is written there, reused only after that slot's frame finished.
+    // `seconds`: the frame's time in the clip. Only Reveal uses it: it decides where the line is.
     void compose(ID3D12GraphicsCommandList* list, pipeline::StateTracker& states, ID3D12Resource* y, ID3D12Resource* uv, bool generated,
-                 const RecordingRawFrame* raw = nullptr, unsigned slot = 0);
+                 const RecordingRawFrame* raw = nullptr, unsigned slot = 0, double seconds = 0.0);
+    // Reveal: a sweep starts every so many seconds (compareRevealInterval; 3 unless set).
+    void setRevealInterval(double seconds) { revealInterval_ = compareRevealInterval(seconds); }
+    // Reveal, after a frame was composed: the x from which the picture is the console side (left of
+    // it: every presented frame), and whether the line was on the picture.
+    uint32_t revealX() const { return revealX_; }
+    bool revealLineShown() const { return revealLineShown_; }
+    uint32_t revealLineWidth() const { return lineW_; }
     uint64_t generatedFrames() const { return generated_; }
     uint64_t realFrames() const { return real_; }
     uint64_t rawFrames() const { return rawFrames_; }
@@ -156,7 +162,10 @@ private:
     struct Raw;
     struct Blend;
     void rawPass(ID3D12GraphicsCommandList* list, pipeline::StateTracker& states, const RecordingRawFrame& raw, unsigned slot);
-    void blend(ID3D12GraphicsCommandList* list, pipeline::StateTracker& states, ID3D12Resource* y, ID3D12Resource* uv);
+    // One badge (or part of one) to blend: overlay `index` from its column `sourceX` on, at (x, y).
+    struct Draw { size_t index = 0; uint32_t x = 0, y = 0, width = 0, height = 0, sourceX = 0; };
+    void blend(ID3D12GraphicsCommandList* list, pipeline::StateTracker& states, ID3D12Resource* y, ID3D12Resource* uv,
+               const Draw* draws, size_t count);
     Microsoft::WRL::ComPtr<ID3D12Resource> holdY_, holdUv_, upload_, outY_, outUv_;
     std::unique_ptr<SideBySide> sideBySide_;
     std::unique_ptr<Vertical> vertical_;
@@ -170,6 +179,11 @@ private:
     uint32_t outW_ = 0, outH_ = 0;
     CompareCrop crop_;
     bool hdr_ = false, holdValid_ = false, rawHold_ = false;
+    // Reveal: which overlays are the PushFPS badge, the console badge and the line (-1: none).
+    int revealPush_ = -1, revealConsole_ = -1, revealLine_ = -1;
+    uint32_t lineW_ = 0, revealX_ = 0;
+    bool revealLineShown_ = false;
+    double revealInterval_ = 3.0;
     uint64_t generated_ = 0, real_ = 0, rawFrames_ = 0;
 };
 

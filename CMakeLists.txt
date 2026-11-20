@@ -337,6 +337,9 @@ veyra_add_compute_shader(veyra_shader_push_ambient_blur PushAmbientBlur)
 veyra_add_compute_shader(veyra_shader_push_flow_pack PushFlowPack)
 veyra_add_compute_shader(veyra_shader_push_flow_unpack PushFlowUnpack)
 veyra_add_compute_shader(veyra_shader_push_flow_reconstruct PushFlowReconstruct)
+# PushFlow 2's Guard: where an object was left out of a generated frame, the nearer real frame.
+veyra_add_compute_shader(veyra_shader_push_guard PushGuard)
+veyra_add_compute_shader(veyra_shader_push_predict PushPredict)
 # Nv12Upload: byte buffer -> luma/chroma planes (copy-free upload path).
 veyra_add_compute_shader(veyra_shader_nv12_upload Nv12Upload)
 # PresentBlit: fullscreen-triangle pixel blit onto flip-model back buffers.
@@ -469,7 +472,7 @@ if(VEYRA_ONNXRUNTIME_ROOT AND EXISTS "${VEYRA_ONNXRUNTIME_ROOT}/build/native/inc
 else()
   message(STATUS "PushFlow: ONNX Runtime headers not found; PushFlow is built as unavailable")
 endif()
-add_dependencies(veyra_pipeline veyra_shader_push_flow_pack veyra_shader_push_flow_unpack veyra_shader_push_flow_reconstruct)
+add_dependencies(veyra_pipeline veyra_shader_push_flow_pack veyra_shader_push_flow_unpack veyra_shader_push_flow_reconstruct veyra_shader_push_guard veyra_shader_push_predict)
 
 # Optional independent RX7000 network worker. All third-party source and runtime
 # assets remain external; only our host and reproducible preparation script live here.
@@ -562,11 +565,11 @@ target_compile_options(veyra_nis_gpu_tests PRIVATE /utf-8)
 target_link_libraries(veyra_nis_gpu_tests PRIVATE veyra_pipeline)
 add_dependencies(veyra_nis_gpu_tests veyra_shader_nis_color veyra_shader_nis_scaler_sdr veyra_shader_nis_scaler_pq)
 # PushFPS comparison clips and HUD frame sampling on a real D3D12 device (hardware or WARP), run in CI.
-add_executable(veyra_push_gpu_tests tests/integration/PushGpuTests.cpp src/engine/PushHud.cpp src/engine/PushHudSampler.cpp src/engine/RecordingCompare.cpp src/engine/PushStreamOverlay.cpp src/engine/PushLayerSourcesShape.cpp)
+add_executable(veyra_push_gpu_tests tests/integration/PushGpuTests.cpp src/engine/PushHud.cpp src/engine/PushHudSampler.cpp src/engine/RecordingCompare.cpp src/engine/RecordingComparePlan.cpp src/engine/PushStreamOverlay.cpp src/engine/PushLayerSourcesShape.cpp)
 target_compile_features(veyra_push_gpu_tests PRIVATE cxx_std_20)
 target_compile_options(veyra_push_gpu_tests PRIVATE /utf-8)
 target_link_libraries(veyra_push_gpu_tests PRIVATE veyra_pipeline)
-add_dependencies(veyra_push_gpu_tests veyra_shader_nr_residual veyra_shader_push_hud_lock_update veyra_shader_push_hud_lock_compose veyra_shader_push_compare_sbs veyra_shader_push_compare_vertical veyra_shader_push_compare_raw veyra_shader_push_compare_overlay veyra_shader_push_layer_blend veyra_shader_push_canvas_convert veyra_shader_push_ambient_down veyra_shader_push_ambient_blur veyra_shader_push_flow_pack veyra_shader_push_flow_unpack veyra_shader_push_flow_reconstruct)
+add_dependencies(veyra_push_gpu_tests veyra_shader_push_guard veyra_shader_push_predict veyra_shader_nr_residual veyra_shader_push_hud_lock_update veyra_shader_push_hud_lock_compose veyra_shader_push_compare_sbs veyra_shader_push_compare_vertical veyra_shader_push_compare_raw veyra_shader_push_compare_overlay veyra_shader_push_layer_blend veyra_shader_push_canvas_convert veyra_shader_push_ambient_down veyra_shader_push_ambient_blur veyra_shader_push_flow_pack veyra_shader_push_flow_unpack veyra_shader_push_flow_reconstruct)
 
 # PushFlowBench (tools/pushflow_bench): PushFlow timings on this PC's GPU, as JSON; shipped next to PushFPS.exe.
 add_executable(veyra_pushflow_bench tools/pushflow_bench/main.cpp)
@@ -574,7 +577,7 @@ target_compile_features(veyra_pushflow_bench PRIVATE cxx_std_20)
 target_compile_options(veyra_pushflow_bench PRIVATE /utf-8)
 target_link_libraries(veyra_pushflow_bench PRIVATE veyra_pipeline psapi)
 set_target_properties(veyra_pushflow_bench PROPERTIES OUTPUT_NAME PushFlowBench)
-add_dependencies(veyra_pushflow_bench veyra_shader_push_flow_pack veyra_shader_push_flow_unpack veyra_shader_push_flow_reconstruct)
+add_dependencies(veyra_pushflow_bench veyra_shader_push_flow_pack veyra_shader_push_flow_unpack veyra_shader_push_flow_reconstruct veyra_shader_push_guard veyra_shader_push_predict)
 
 add_executable(veyra_pipeline_tests
   tests/unit/PipelineContractTests.cpp
@@ -1021,6 +1024,43 @@ target_include_directories(veyra_frame_input_tests PRIVATE ${CMAKE_CURRENT_SOURC
 add_executable(veyra_push_archive_paths_tests tests/unit/PushArchivePathsTests.cpp)
 target_compile_features(veyra_push_archive_paths_tests PRIVATE cxx_std_20)
 target_include_directories(veyra_push_archive_paths_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# PushFPS comparison clips without graphics (engine/RecordingComparePlan.h, pure): the clip quality rules,
+# the Reveal layout's timing and its line.
+add_executable(veyra_push_compare_plan_tests tests/unit/PushComparePlanTests.cpp src/engine/RecordingComparePlan.cpp)
+target_compile_features(veyra_push_compare_plan_tests PRIVATE cxx_std_20)
+target_include_directories(veyra_push_compare_plan_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# PushFPS frame generation health (engine/PushFgHealth.h, pure): on and nothing generated is said, with its cause.
+add_executable(veyra_push_fg_health_tests tests/unit/PushFgHealthTests.cpp)
+target_compile_features(veyra_push_fg_health_tests PRIVATE cxx_std_20)
+target_include_directories(veyra_push_fg_health_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# PushFPS PushFlow half precision (engine/PushHalfApproval.h, pure): a pass holds for one card, driver and version.
+add_executable(veyra_push_half_approval_tests tests/unit/PushHalfApprovalTests.cpp)
+target_compile_features(veyra_push_half_approval_tests PRIVATE cxx_std_20)
+target_include_directories(veyra_push_half_approval_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# PushFPS crop of the picture in the view (engine/PreviewView.h, pure): the kept part fits, fills or is stretched.
+add_executable(veyra_push_view_crop_tests tests/unit/PushViewCropTests.cpp)
+target_compile_features(veyra_push_view_crop_tests PRIVATE cxx_std_20)
+target_include_directories(veyra_push_view_crop_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# PushFlow's motion contract and motion size (pushflow/PushFlowMotion.h, pure): the reference its shader is tested against.
+add_executable(veyra_push_flow_motion_tests tests/unit/PushFlowMotionTests.cpp)
+target_compile_features(veyra_push_flow_motion_tests PRIVATE cxx_std_20)
+target_include_directories(veyra_push_flow_motion_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# PushFlow 2's Predict, the rule for one pixel and where the frames stand in time (pushflow/PushFlowPredict.h, pure).
+add_executable(veyra_push_flow_predict_tests tests/unit/PushFlowPredictTests.cpp)
+target_compile_features(veyra_push_flow_predict_tests PRIVATE cxx_std_20)
+target_include_directories(veyra_push_flow_predict_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# PushFlow 2's Guard, the decision (pushflow/PushFlowGuard.h, pure): which tiles show the nearer real frame.
+add_executable(veyra_push_flow_guard_tests tests/unit/PushFlowGuardTests.cpp)
+target_compile_features(veyra_push_flow_guard_tests PRIVATE cxx_std_20)
+target_include_directories(veyra_push_flow_guard_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# PushFlow 2's experiment switches (pushflow/PushFlow2.h, pure): off unless asked for, damaged preferences, the emergency stop.
+add_executable(veyra_push_flow2_tests tests/unit/PushFlow2Tests.cpp)
+target_compile_features(veyra_push_flow2_tests PRIVATE cxx_std_20)
+target_include_directories(veyra_push_flow2_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# PushFPS performance report (engine/PushPerfReport.h, pure): what was measured, and nothing personal.
+add_executable(veyra_push_perf_report_tests tests/unit/PushPerfReportTests.cpp)
+target_compile_features(veyra_push_perf_report_tests PRIVATE cxx_std_20)
+target_include_directories(veyra_push_perf_report_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # PushFPS crash notice: the summary a user can copy holds nothing personal (engine/PushCrashNote.h, pure).
 add_executable(veyra_push_crash_note_tests tests/unit/PushCrashNoteTests.cpp)
 target_compile_features(veyra_push_crash_note_tests PRIVATE cxx_std_20)
@@ -1674,7 +1714,7 @@ add_executable(veyra_sr_reconstruction_tests tests/integration/SrReconstructionT
   target_link_libraries(veyra_repair_fg_tests PRIVATE veyra_pipeline veyra_sinks veyra_nvof)
 
   # Headless quality-core runner (Playbook R3.3): the phase5 gate's quality
-  add_library(veyra_engine STATIC src/engine/EngineController.cpp src/engine/EngineWatchdog.cpp src/engine/PreviewGpuSession.cpp src/engine/EngineControllerImage.cpp src/engine/PosterFrame.cpp src/engine/EffectChain.cpp src/engine/PresetLibrary.cpp src/ui/PlayerUiFacade.cpp src/engine/TiledImageProcessor.cpp src/engine/PresetStore.cpp src/engine/VideoPresenter.cpp src/engine/DisplayStateService.cpp src/engine/VideoExportJob.cpp src/engine/ExportStreams.cpp src/engine/ExportQueue.cpp src/engine/ExportJobManager.cpp src/engine/Subtitles.cpp src/engine/FgCompatibilityProbe.cpp src/engine/LiveRecorder.cpp src/engine/ReplayBuffer.cpp src/engine/MicrophoneCapture.cpp src/engine/PushHud.cpp src/engine/PushHudSampler.cpp src/engine/RecordingCompare.cpp src/engine/LiveStream.cpp src/engine/Mp4Finalize.cpp src/engine/PushAudioMix.cpp src/engine/PushStreamOverlay.cpp src/engine/PushLayerSources.cpp src/engine/PushLayerSourcesShape.cpp src/engine/PushAuxAudio.cpp src/engine/PushAuxFifo.cpp src/engine/PushQuality.cpp src/engine/PushQualityProbe.cpp src/engine/PushInputLatency.cpp src/engine/PushInputLatencyProbe.cpp)
+  add_library(veyra_engine STATIC src/engine/EngineController.cpp src/engine/EngineWatchdog.cpp src/engine/PreviewGpuSession.cpp src/engine/EngineControllerImage.cpp src/engine/PosterFrame.cpp src/engine/EffectChain.cpp src/engine/PresetLibrary.cpp src/ui/PlayerUiFacade.cpp src/engine/TiledImageProcessor.cpp src/engine/PresetStore.cpp src/engine/VideoPresenter.cpp src/engine/DisplayStateService.cpp src/engine/VideoExportJob.cpp src/engine/ExportStreams.cpp src/engine/ExportQueue.cpp src/engine/ExportJobManager.cpp src/engine/Subtitles.cpp src/engine/FgCompatibilityProbe.cpp src/engine/LiveRecorder.cpp src/engine/ReplayBuffer.cpp src/engine/MicrophoneCapture.cpp src/engine/PushHud.cpp src/engine/PushHudSampler.cpp src/engine/RecordingCompare.cpp src/engine/RecordingComparePlan.cpp src/engine/LiveStream.cpp src/engine/Mp4Finalize.cpp src/engine/PushAudioMix.cpp src/engine/PushStreamOverlay.cpp src/engine/PushLayerSources.cpp src/engine/PushLayerSourcesShape.cpp src/engine/PushAuxAudio.cpp src/engine/PushAuxFifo.cpp src/engine/PushQuality.cpp src/engine/PushQualityProbe.cpp src/engine/PushInputLatency.cpp src/engine/PushInputLatencyProbe.cpp)
   target_sources(veyra_pipeline PRIVATE src/guidance/AmdOpticalFlow.cpp
     src/guidance/GpuDisOpticalFlow.cpp third_party/gpu-dis/src/gpu/native_strict_dis_provider.cpp)
   target_include_directories(veyra_pipeline PRIVATE third_party/gpu-dis/src/gpu)
@@ -1702,6 +1742,14 @@ add_executable(veyra_sr_reconstruction_tests tests/integration/SrReconstructionT
   target_compile_options(veyra_push_flow_graph_tests PRIVATE /utf-8)
   target_include_directories(veyra_push_flow_graph_tests PRIVATE ${FFMPEG_INCLUDE_DIRS})
   target_link_libraries(veyra_push_flow_graph_tests PRIVATE veyra_engine)
+  # PushFPS: PushFlow 2's Predict through the whole engine with a live source (a Frame Input channel fed by
+  # the test itself): the engine's side of Predict, which no graph test reaches.
+  add_executable(veyra_push_predict_engine_tests tests/integration/PushPredictEngineTests.cpp)
+  target_compile_features(veyra_push_predict_engine_tests PRIVATE cxx_std_20)
+  target_compile_options(veyra_push_predict_engine_tests PRIVATE /utf-8)
+  target_include_directories(veyra_push_predict_engine_tests PRIVATE ${FFMPEG_INCLUDE_DIRS})
+  target_link_libraries(veyra_push_predict_engine_tests PRIVATE veyra_engine)
+  target_link_options(veyra_push_predict_engine_tests PRIVATE /STACK:8388608)
   # PushFPS going live: RTMP/RTMPS outputs against a local MediaMTX (tests/data/stream/run-live-stream-tests.sh).
   add_executable(veyra_live_stream_tests tests/integration/LiveStreamTests.cpp src/engine/LiveStream.cpp)
   target_compile_features(veyra_live_stream_tests PRIVATE cxx_std_20)

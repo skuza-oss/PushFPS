@@ -1,0 +1,72 @@
+name: Hardware report
+description: Tell us how PushFPS runs on your graphics card, so it can go on the tested hardware list.
+title: "[Hardware] "
+labels: ["hardware report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! Reports like this are how a graphics card gets onto the tested list, and how PushFlow gets faster on it.
+
+        Two things to paste, both made by PushFPS and both free of anything personal:
+        1. **Performance report**: play for a few minutes, then *Settings → Performance report → Copy*.
+        2. **Graphics card test** (optional, about a minute, nothing may be playing): *Settings → Test my graphics card → Copy result*.
+
+        How to measure, and what the numbers mean: [docs/BENCHMARKING.md](https://github.com/DosukaSOL/PushFPS/blob/main/docs/BENCHMARKING.md)
+  - type: input
+    id: card
+    attributes:
+      label: Graphics card
+      placeholder: "GeForce RTX 4070 12 GB"
+    validations:
+      required: true
+  - type: dropdown
+    id: works
+    attributes:
+      label: How does it run?
+      options:
+        - "Well: smooth at my target"
+        - "It runs, with problems (see notes)"
+        - "It does not work"
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Console, game and how it reaches the PC
+      description: The game's own frame rate matters (30, 40 or 60 FPS).
+      placeholder: "PS5 Pro, GTA V at 30 FPS, Elgato 4K X over USB 3.2"
+    validations:
+      required: true
+  - type: input
+    id: target
+    attributes:
+      label: Frame generation method, target and screen
+      placeholder: "PushFlow Balanced, 30 to 120 FPS, 1440p 144 Hz with G-SYNC"
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Performance report
+      description: "Settings → Performance report → Copy, while the game is playing."
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: cardtest
+    attributes:
+      label: Graphics card test result (optional)
+      description: "Settings → Test my graphics card → Copy result."
+      render: json
+  - type: input
+    id: session
+    attributes:
+      label: How long did you play?
+      description: A card goes on the list after at least one steady session of half an hour.
+      placeholder: "About 45 minutes"
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Stutter, dropped frames, crashes, settings you had to change. If you measured delay with a camera, say how.

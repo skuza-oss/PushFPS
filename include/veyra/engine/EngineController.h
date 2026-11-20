@@ -142,7 +142,15 @@ struct PlayerSnapshot {
     uint64_t pacingFrames=0,pacingRepaired=0;
     int hudLockState=0;  // PushFPS Live HUD Lock: EnhanceGraph::hudLockState()
     // PushFlow while it runs: precision ("fp32"/"fp16"), full-resolution rebuild, inference p50/p95 (ms).
-    std::string pushFlowPrecision; bool pushFlowRebuild=false; double pushFlowP50Ms=0, pushFlowP95Ms=0;
+    std::string pushFlowPrecision; bool pushFlowRebuild=false; double pushFlowP50Ms=0, pushFlowP95Ms=0; uint32_t pushFlowMotionWidth=0, pushFlowMotionHeight=0;
+    // PushFPS: PushFlow 2's encoder cache ("" not asked for, "on", or why it is not used) and what it did.
+    std::string pushFlowEncoderCache; uint64_t pushFlowEncoderRuns=0, pushFlowFeaturesKept=0, pushFlowFeaturesMade=0; double pushFlowWholeMs=0, pushFlowSplitMs=0, pushFlowSplitCheckDb=0;
+    // PushFPS: PushFlow 2's Guard ("" not asked for, "on", or why not) and the frames it judged, mended and held.
+    std::string pushFlowGuard; uint64_t pushFlowGuardFrames=0, pushFlowGuardMended=0, pushFlowGuardHeld=0;
+    // PushFPS: PushFlow 2's Predict ("" not asked for, "on", or why not): forecast frames made, the pixels
+    // counted in them, how many of those the motion would move and how many of those were held, and the
+    // forecasts not shown because the next real frame was already due.
+    std::string pushFlowPredict; uint64_t pushFlowPredictFrames=0, pushFlowPredictCounted=0, pushFlowPredictMoving=0, pushFlowPredictHeld=0, pushFlowPredictSuperseded=0;
     uint64_t frames=0,generated=0;
     uint64_t captureReceived=0,captureDropped=0,nrEvaluated=0,nvofExecuted=0;
     uint64_t captureRateSkipped=0,processedCompleted=0;
@@ -215,6 +223,10 @@ public:
     bool prewarmEnhancement(EnhancementSettings,unsigned width=1920,unsigned height=1080);
     void setEnhancementPrewarmEnabled(bool);
     bool requestSettings(EnhancementSettings,std::optional<ChainRuntimeOrder> = std::nullopt,uint64_t* acceptedRevision=nullptr);
+    // PushFPS: something outside the settings that shapes the graph has changed (PushFlow's motion size,
+    // pushflow/PushFlowMotion.h). The current settings get a new revision, so the run loop describes the
+    // graph again and rebuilds it if the description differs, exactly as after a settings change.
+    void refreshGraph();
     void requestPresentation(PresentationSettings);
     void open(HWND video,const std::wstring& path,PlayerOptions options);
 #ifdef VEYRA_ENABLE_REMOTEPLAY
@@ -263,7 +275,7 @@ public:
     bool setPlaybackRate(double rate);
     void setFullscreenMemoryProtection(bool enabled);
     void observeHdrCoverage(bool on){hdrCoverageObserved_=on;}
-    void previewView(PreviewView view){if(!std::isfinite(view.zoom)||!std::isfinite(view.centerX)||!std::isfinite(view.centerY)||!std::isfinite(view.displayAspect)||view.displayAspect<0||view.mode<0||view.mode>6)return;std::lock_guard lock(mutex_);view.zoom=std::clamp(view.zoom,.05f,64.0f);if(view.displayAspect==0)view.displayAspect=previewView_.displayAspect;view.rotationDegrees=previewView_.rotationDegrees;view.userQuarterTurns=previewView_.userQuarterTurns;previewView_=view;}
+    void previewView(PreviewView view){if(!std::isfinite(view.zoom)||!std::isfinite(view.centerX)||!std::isfinite(view.centerY)||!std::isfinite(view.displayAspect)||view.displayAspect<0||view.mode<0||view.mode>6)return;std::lock_guard lock(mutex_);view.zoom=std::clamp(view.zoom,.05f,64.0f);view.cropLeft=PreviewView::cropSide(view.cropLeft);view.cropTop=PreviewView::cropSide(view.cropTop);view.cropRight=PreviewView::cropSide(view.cropRight);view.cropBottom=PreviewView::cropSide(view.cropBottom);if(view.displayAspect==0)view.displayAspect=previewView_.displayAspect;view.rotationDegrees=previewView_.rotationDegrees;view.userQuarterTurns=previewView_.userQuarterTurns;previewView_=view;}
     bool rotatePreviewClockwise(uint64_t session){std::lock_guard lock(mutex_);if(session!=snapshot_.sessionId||(!snapshot_.running&&!snapshot_.image))return false;previewView_.rotateClockwise();return true;}
     PreviewView previewView()const{std::lock_guard lock(mutex_);return previewView_;}
     void setVolume(float gain,bool mute);
@@ -368,6 +380,9 @@ private:
     EnhancementSettings desired_;uint64_t nextRevision_=1;
     std::optional<ChainRuntimeOrder> desiredNodeOrder_; // protected by mutex_, paired with desired_
     std::atomic<bool> stop_{false},paused_{false},muted_{false};
+    // PushFlow 2's Predict, engine thread only: the newest real frame's time and when it is due, so a
+    // forecast made from the frame before it is never shown after it; and how many were dropped for that.
+    int64_t predictNewestReal100ns_=0,predictNewestDue100ns_=0;uint64_t predictSuperseded_=0;
     std::atomic<bool> captureAudioMonitoring_{true};
     std::atomic<float> volume_{1};uint64_t sessionId_=0;
     std::atomic<double> seekSeconds_{-1};

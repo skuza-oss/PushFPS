@@ -719,6 +719,12 @@ static int runApplication(int argc, char** argv, QString& restartProgram, QStrin
         const auto importAt = early.indexOf(QStringLiteral("--import-1.4.4-data"));
         if (importAt > 0 && importAt + 1 < early.size())
             legacyDirectory = std::filesystem::path(early.at(importAt + 1).toStdWString());
+        // PushFPS: `--safe-mode` keeps every PushFlow 2 experiment off for this run (pushflow/PushFlow2.h).
+        // Nothing saved is changed: started without it, PushFPS is as it was left.
+        if (early.contains(QStringLiteral("--safe-mode"))) {
+            SetEnvironmentVariableW(L"VEYRA_PUSHFLOW2_OFF", L"1");
+            veyra::log::info("app", "safe mode: the PushFlow 2 experiments stay off for this run");
+        }
     }
     if (!explicitDataDirectory) {
         const auto migration = ui::prepareQmlDataDirectory(legacyDirectory, dataDirectory);
@@ -819,6 +825,7 @@ static int runApplication(int argc, char** argv, QString& restartProgram, QStrin
     //   --full-bar <shown|hidden>  fullscreen with the control window held shown / hidden
     //   --full-debug            log every pointer movement the fullscreen controls see
     //   --data-dir <path>       presets and session history from that folder (read before the bridge exists)
+    //   --safe-mode             PushFPS: every PushFlow 2 experiment off for this run, nothing saved changed
     //   --import-1.4.4-data <path>  read-only legacy settings source for first 2.0.0 launch
     //   --motion-probe <name>   dock | page | switch | seg | menu: start that motion, log its value per frame
     //   --exit-after <ms>       quit the app by itself after N ms, so a test run ends

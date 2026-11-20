@@ -1897,6 +1897,49 @@ VPage {
                                     onPicked: id => veyra.vfgQuality = Number(id)
                                 }
                             }
+                            // The motion size apart from the tier (3.2.7): PushFlowMotionRow.qml.
+                            PushFlowMotionRow { visible: veyra.fgBackendName === "pushflow" }
+                            // PushFlow 2 experiments, each off unless switched on here (PushFlow2Row.qml).
+                            PushFlow2Row {
+                                objectName: "list-pushflow2-fusion-row"
+                                visible: veyra.fgBackendName === "pushflow"
+                                part: "fusion"
+                                stateKey: "pushFlowEncoderCache"
+                                describe: function(st) {
+                                    return qsTr("正在使用。启动时测得：完整模型每帧 %1 ms，拆分后 %2 ms；已复用 %3 次，重新编码 %4 次")
+                                        .arg(Number(st.pushFlowWholeMs || 0).toFixed(1)).arg(Number(st.pushFlowSplitMs || 0).toFixed(1))
+                                        .arg(Math.round(Number(st.pushFlowFeaturesKept || 0))).arg(Math.round(Number(st.pushFlowFeaturesMade || 0)))
+                                }
+                                title: qsTr("PushFlow 2：每个真实帧只编码一次（实验）")
+                                explanation: qsTr("PushFlow 的模型每生成一帧，都要把前后两个真实帧各编码一遍。开启后，每个真实帧只编码一次，结果留给下一对画面和同一对里的其他时刻使用，所以 3× 和 4× 省得更多。画面应当和不开启时一样：启动时会在你的显卡上和完整模型对比，不一致就不使用。它是否真的更快，取决于显卡，目前还没有在真实显卡上测过")
+                            }
+                            PushFlow2Row {
+                                objectName: "list-pushflow2-guard-row"
+                                visible: veyra.fgBackendName === "pushflow"
+                                part: "guard"
+                                stateKey: "pushFlowGuard"
+                                describe: function(st) {
+                                    return qsTr("正在使用。已检查 %1 个生成帧：%2 帧局部改用真实帧，%3 帧整帧改用真实帧")
+                                        .arg(Math.round(Number(st.pushFlowGuardFrames || 0))).arg(Math.round(Number(st.pushFlowGuardMended || 0)))
+                                        .arg(Math.round(Number(st.pushFlowGuardHeld || 0)))
+                                }
+                                title: qsTr("PushFlow 2：Guard，补回被漏掉的物体（实验）")
+                                explanation: qsTr("物体在两个真实帧之间移动得太快时，PushFlow 跟不上，生成帧里这个物体会整个消失，看起来像闪烁。Guard 找出这些位置，在那里改用时间上更近的真实帧：物体不再消失，而是按游戏本身的帧率移动。它不会凭空生成画面；一帧里有三分之一以上的位置有问题时，整帧改用真实帧，并且如实计数。这条规则只在测试图上验证过，在真实游戏里是否更好看还不知道，所以需要你来判断")
+                            }
+                            PushFlow2Row {
+                                objectName: "list-pushflow2-predict-row"
+                                visible: veyra.fgBackendName === "pushflow"
+                                part: "predict"
+                                stateKey: "pushFlowPredict"
+                                describe: function(st) {
+                                    if (st.pushFlowPredictPaused === true) return qsTr("已让位：画质测试或自动优化正在测量普通的中间帧，结束后恢复")
+                                    return qsTr("正在使用。已生成 %1 个预测帧；运动的画面中有 %2 % 因不可信而保持不动；%3 个预测帧因下一个真实帧已到而没有显示")
+                                        .arg(Math.round(Number(st.pushFlowPredictFrames || 0))).arg(Number(st.pushFlowPredictHeldPercent || 0).toFixed(0))
+                                        .arg(Math.round(Number(st.pushFlowPredictSuperseded || 0)))
+                                }
+                                title: qsTr("PushFlow 2：Predict，不等下一帧（实验）")
+                                explanation: qsTr("普通补帧要等下一个真实帧到达，才能在两帧之间生成画面，所以真实画面会晚大约一帧才显示。Predict 不等：最新的真实帧处理完就显示，它之后的画面由已经到达的两帧预测出来。延迟更低，但预测可能出错：物体突然改变方向或新物体出现时，预测帧会和实际不同，直到下一个真实帧纠正。不可信的位置保持最新真实帧不动，不会凭空生成画面。只用于采集卡、串流等实时画面，不用于视频文件和导出。延迟实际降低多少、画面是否可以接受，还没有在真实硬件上测量过，需要你来判断")
+                            }
                             // Half precision is tested in a separate process first (PushFlowBench --fp16-probe):
                             // the switch only turns on after that test passed on this graphics card.
                             VRow {
@@ -1911,6 +1954,7 @@ VPage {
                                 help: qsTr("半精度（fp16）通常让 PushFlow 的网络快一倍左右，但是否可用取决于显卡、驱动和 DirectML。测试在单独的进程里运行，出错也不会影响 PushFPS")
                                 hint: testing ? qsTr("正在测试，约需半分钟…")
                                     : pushFlowHalfRow.probe.ok === true ? qsTr("已通过测试：每帧 %1 ms，全精度 %2 ms").arg(Number(pushFlowHalfRow.probe.halfMs || 0).toFixed(1)).arg(Number(pushFlowHalfRow.probe.fullMs || 0).toFixed(1))
+                                    : pushFlowHalfRow.probe.reason === "retest" ? qsTr("显卡、驱动或 PushFPS 版本变了：请重新测试后再开启。现在使用全精度")
                                     : pushFlowHalfRow.probe.reason ? qsTr("上次测试没有通过，使用全精度")
                                     : qsTr("先测试这块显卡；通过后才能开启。请在没有播放时测试")
                                 hintBelow: true

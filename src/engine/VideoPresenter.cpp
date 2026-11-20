@@ -296,9 +296,33 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
     const auto [renderW,renderH]=view.renderedSize(float(rc.right),float(rc.bottom),float(graph.workWidth()),float(graph.workHeight()));
     D3D12_VIEWPORT viewport{0,0,float(sink_.bufferWidth()),float(sink_.bufferHeight()),0,1};
     D3D12_RECT rect{0,0,LONG(sink_.bufferWidth()),LONG(sink_.bufferHeight())};list->RSSetViewports(1,&viewport);list->RSSetScissorRects(1,&rect);
+    // PushFPS crop (PreviewView): the kept part of the picture in back-buffer pixels. Every draw of the
+    // picture is scissored to it, so the cut parts are never shown and the rest of the window keeps what
+    // is behind it (black, or the ambient backdrop). Without a crop it is the whole buffer and nothing
+    // below differs from before.
+    const bool cropped=view.cropped()&&rc.right>0&&rc.bottom>0;
+    D3D12_RECT pictureRect=rect;
+    if(cropped){
+        const auto kept=view.keptRect(float(rc.right),float(rc.bottom),renderW,renderH);
+        const float bufferW=float(sink_.bufferWidth()),bufferH=float(sink_.bufferHeight());
+        const float scaleX=bufferW/float(rc.right),scaleY=bufferH/float(rc.bottom);
+        // Every edge on an even pixel, inwards. The pixel shader works in blocks of 2 x 2 pixels and
+        // takes its sampling footprint from the block. A scissor edge through a block left the software
+        // renderer (WARP) with a neighbour it had not shaded: the first kept column then showed pixels
+        // sampled from elsewhere in the picture (screenshot 81, 19 November 2026, with the left edge at
+        // 213). With whole blocks nothing is shared across the edge. At most one pixel per side is lost.
+        const auto evenUp=[](float value,float bound){return LONG(std::clamp(std::ceil(value*.5f)*2.0f,0.0f,bound));};
+        const auto evenDown=[](float value,float bound){return LONG(std::clamp(std::floor(value*.5f)*2.0f,0.0f,bound));};
+        pictureRect.left=evenUp(kept.left*scaleX,bufferW);
+        pictureRect.top=evenUp(kept.top*scaleY,bufferH);
+        pictureRect.right=std::max(pictureRect.left,evenDown(kept.right*scaleX,bufferW));
+        pictureRect.bottom=std::max(pictureRect.top,evenDown(kept.bottom*scaleY,bufferH));
+    }
     // PushFPS ambient fill: only where the picture leaves bars, never beside a comparison (its reference
     // draw paints the bars itself). The blurred copy is made here, before this pass's state is set.
-    const bool ambientFill=pushAmbientFill()&&ambient_.ready()&&comparison==0&&pushAmbientBars(float(rc.right),float(rc.bottom),renderW,renderH)&&
+    // (What the bars are measured against is the kept part when the picture is cropped.)
+    const float shownW=cropped?renderW*view.keptWidth():renderW,shownH=cropped?renderH*view.keptHeight():renderH;
+    const bool ambientFill=pushAmbientFill()&&ambient_.ready()&&comparison==0&&pushAmbientBars(float(rc.right),float(rc.bottom),shownW,shownH)&&
         ambient_.render(list,slot+(generated?2:0),source);
     ID3D12DescriptorHeap* heaps[]={pass_.heap.Get()};list->SetDescriptorHeaps(1,heaps);list->SetGraphicsRootSignature(pass_.rootSig.Get());list->SetPipelineState(pass_.pso.Get());
     const float rotationFlags=float(view.quarterTurns()<<6);
@@ -340,6 +364,7 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
     }
     list->SetGraphicsRoot32BitConstants(0,16,dims,0);
     list->SetGraphicsRootDescriptorTable(1,{pass_.heap->GetGPUDescriptorHandleForHeapStart().ptr+size_t(slot+(generated?2:0))*pass_.increment});
+    if(cropped){rect=pictureRect;list->RSSetScissorRects(1,&rect);}   // PushFPS crop: only the kept part
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);list->DrawInstanced(3,1,0,0);
     if(ambientFill){dims[15]=0.0f;list->SetGraphicsRoot32BitConstants(0,16,dims,0);}
     bool probeIssued=false;
@@ -375,10 +400,14 @@ bool VideoPresenter::present(gfx::D3D12DeviceContext& ctx,gfx::CommandSlotRing& 
         auto* reference=baseReference?graph.baseReference(slot):graph.sourceReference(slot);
         D3D12_RESOURCE_BARRIER b{};b.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;b.Transition.pResource=reference;b.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;b.Transition.StateBefore=D3D12_RESOURCE_STATE_COMMON;b.Transition.StateAfter=D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;list->ResourceBarrier(1,&b);
         dims[2]=samplingFlags+curveFlag+(graph.hdr10Output()?4:graph.hdrOutput()?0:1)+(graph.videoHdrActive()?8:0);list->SetGraphicsRoot32BitConstants(0,16,dims,0);list->SetGraphicsRootDescriptorTable(1,{pass_.heap->GetGPUDescriptorHandleForHeapStart().ptr+size_t(pipeline::kOutputPoolSlots+slot+(baseReference?2:0))*pass_.increment});
-        if(comparison==2)rect.right=LONG(std::clamp((rc.right*.5f+(std::clamp(split,0.0f,1.0f)-view.centerX)*renderW)*sink_.bufferWidth()/rc.right,0.0f,float(sink_.bufferWidth())));list->RSSetScissorRects(1,&rect);list->DrawInstanced(3,1,0,0);
+        // (PushFPS crop: rect is the kept part by now, so the split never uncovers what was cut; without
+        // a crop rect.left is 0 and rect.right the buffer's width, and the two bounds change nothing.)
+        if(comparison==2)rect.right=std::max(rect.left,std::min(rect.right,LONG(std::clamp((rc.right*.5f+(std::clamp(split,0.0f,1.0f)-view.centerX)*renderW)*sink_.bufferWidth()/rc.right,0.0f,float(sink_.bufferWidth())))));list->RSSetScissorRects(1,&rect);list->DrawInstanced(3,1,0,0);
         std::swap(b.Transition.StateBefore,b.Transition.StateAfter);list->ResourceBarrier(1,&b);
         if(veyra::log::verboseFrameLogs())veyra::log::info("comparison",std::format("real-frame source={} epoch={} revision={} reference={} mode={} split={} (same leased frame)",identity.sourceFrameId,identity.epoch,identity.settingsRevision,baseReference?"base":"input",comparison,split));
     }
+    // PushFPS crop: whatever is drawn after the picture (subtitles, provider work) gets the whole buffer again.
+    if(cropped){const D3D12_RECT whole{0,0,LONG(sink_.bufferWidth()),LONG(sink_.bufferHeight())};list->RSSetScissorRects(1,&whole);}
     for(auto& b:barriers)std::swap(b.Transition.StateBefore,b.Transition.StateAfter);
     if(copyBeforePresent_)barriers[1].Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_SOURCE;
     list->ResourceBarrier(2,barriers);

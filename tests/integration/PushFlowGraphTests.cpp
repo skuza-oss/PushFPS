@@ -23,7 +23,11 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <cstdlib>
 #include <iostream>
+#include <map>
+#include <string>
+#include <utility>
 #include <vector>
 extern "C" {
 #include <libavutil/frame.h>
@@ -95,14 +99,30 @@ int wmain(int argc, wchar_t** argv) {
         for (unsigned y = 0; y < H; ++y) std::memcpy(frame->data[0] + size_t(y) * frame->linesize[0], px.data() + size_t(y) * W * 4, size_t(W) * 4);
     };
 
-    for (unsigned multiplier : {2u, 3u}) {
-        const std::string tag = std::to_string(multiplier) + "X";
-        const unsigned frames = multiplier == 2 ? 12 : 7;
+    // The third run is PushFlow with a motion size chosen apart from its tier (3.2.7): the Fast tier's
+    // model at the picture's own size instead of half of it. Fewer frames: four times the work each.
+    // The fourth is PushFlow 2's encoder cache (opt-in) at 3X: the same frames as the plain 3X run, whose
+    // generated pictures it must repeat, with each real frame encoded once.
+    // The fifth is PushFlow 2's Guard (opt-in) on the same frames: the square is followed here, so every
+    // generated frame must be the plain run's, and nothing is mended or held.
+    // The sixth is PushFlow 2's Predict (opt-in): the batch holds the real frame first and forecasts after
+    // it, in order, and each forecast is at least as near to where the square really is later as the
+    // real frame it follows.
+    struct Run { unsigned multiplier; int motion; bool cache; bool guard = false; bool predict = false; };
+    std::map<std::pair<unsigned, unsigned>, std::vector<uint8_t>> plain3x;   // (frame, subframe) -> picture without the cache
+    for (const Run run : {Run{2u, 0, false}, Run{3u, 0, false}, Run{2u, 540, false}, Run{3u, 0, true}, Run{3u, 0, false, true}, Run{3u, 0, false, false, true}}) {
+        const unsigned multiplier = run.multiplier;
+        const std::string tag = std::to_string(multiplier) + "X" + (run.motion ? " at a chosen motion size" : "") + (run.cache ? " with the encoder cache" : "") + (run.guard ? " with Guard" : "") + (run.predict ? " with Predict" : "");
+        const unsigned frames = run.motion ? 5 : multiplier == 2 ? 12 : 7;
         pipeline::EnhanceGraph graph(ctx, ring);
         pipeline::EnhanceGraphDesc desc; desc.sourceWidth = desc.workWidth = W; desc.sourceHeight = desc.workHeight = H;
         desc.rgbInput = true; desc.enableNr = desc.enableSr = false; desc.enableFg = true; desc.fgMultiplier = multiplier;
         desc.frameGenerationBackend = engine::FrameGenerationBackend::PushFlow;
         desc.vfgQuality = 0;  // the Fast tier: the software renderer in CI is slow
+        desc.pushFlowMotion = run.motion;
+        desc.pushFlowEncoderCache = run.cache;
+        desc.pushFlowGuard = run.guard;
+        desc.pushFlowPredict = run.predict;
         desc.runtimeAbsPath = argv[2]; desc.settingsRevision = multiplier;
         const bool opened = graph.initialize(desc) && graph.createViews();
         if (!check(opened, tag + ": the graph opens with PushFlow") || !check(graph.pushFlowActive(), tag + ": PushFlow is ready")) {
@@ -110,7 +130,22 @@ int wmain(int argc, wchar_t** argv) {
             graph.shutdown(); continue;
         }
         check(graph.fgCreated(), tag + ": the graph counts PushFlow as a frame generation method");
-        unsigned offered = 0, pairs = 0, generated = 0, checked = 0, between = 0, ordered = 0, resetsWithoutFrame = 0;
+        {
+            // The size the motion is worked out at: Fast's own is half the picture; a chosen size is used
+            // as far as the picture goes (never enlarged), so here the picture's own size.
+            const auto summary = graph.pushFlowSummary();
+            std::cout << "PUSHFLOW_GRAPH " << tag << " motion size " << summary.motionWidth << "x" << summary.motionHeight << " rebuild=" << summary.rebuild << std::endl;
+            check(summary.encoderCache == (run.cache ? "on" : ""), tag + (run.cache ? ": the encoder cache is in use" : ": the encoder cache is not asked for and not in use") + " ('" + summary.encoderCache + "')");
+            check(summary.guard == (run.guard ? "on" : ""), tag + (run.guard ? ": Guard is in use" : ": Guard is not asked for and not in use") + " ('" + summary.guard + "')");
+            check(summary.predict == (run.predict ? "on" : "") && graph.pushFlowPredicting() == run.predict, tag + (run.predict ? ": Predict is in use" : ": Predict is not asked for and not in use") + " ('" + summary.predict + "')");
+            if (run.cache) std::cout << "PUSHFLOW_GRAPH " << tag << " start-up check " << summary.splitCheckDb << " dB, whole " << summary.wholeMs << " ms, split " << summary.splitMs << " ms" << std::endl;
+            if (run.motion) check(summary.motionWidth == W && summary.motionHeight == H && !summary.rebuild, tag + ": the network runs at the chosen size, here the whole picture");
+            else check(summary.motionWidth == W / 2 && summary.motionHeight == H / 2 && summary.rebuild, tag + ": the tier's own motion size is what it was (half the picture, rebuilt at full size)");
+        }
+        unsigned offered = 0, pairs = 0, generated = 0, checked = 0, between = 0, ordered = 0, resetsWithoutFrame = 0, cacheChecked = 0, cacheSame = 0;
+        unsigned realFirst = 0, forecastsInOrder = 0, plainOrder = 0, notWorse = 0, nearer = 0;
+        double worstAgainstHold = 1e9;
+        int cacheWorst = 0;
         double worstMargin = 1e9, realDb = 0, slowestMs = 0; bool ok = true;
         std::vector<uint8_t> previous;
         for (unsigned i = 0; ok && i < frames; ++i) {
@@ -132,6 +167,34 @@ int wmain(int argc, wchar_t** argv) {
             if (reset) { resetsWithoutFrame += !out.hasGenerated; previous = now; continue; }
             ++pairs;
             offered += out.fgCandidates == multiplier - 1;
+            {
+                // The batch's order: in-between frames then the real frame; with Predict the real frame, then
+                // its forecasts, each later than the one before and before the next real frame is expected.
+                const auto& batch = out.batch;
+                const int64_t interval = batch.b100ns - batch.a100ns;
+                bool first = batch.count == multiplier && batch.frames[0].kind == pipeline::FrameKind::Real && batch.frames[0].pts100ns == batch.b100ns && out.fgPredict;
+                bool rising = first;
+                for (unsigned k = 1; first && k < batch.count; ++k)
+                    rising = rising && batch.frames[k].kind == pipeline::FrameKind::Generated && batch.frames[k].subframe == k &&
+                             batch.frames[k].pts100ns > batch.frames[k - 1].pts100ns && batch.frames[k].pts100ns < batch.b100ns + interval;
+                realFirst += first; forecastsInOrder += rising;
+                plainOrder += batch.count == multiplier && batch.frames[batch.count - 1].kind == pipeline::FrameKind::Real && batch.frames[batch.count - 1].pts100ns == batch.b100ns && !out.fgPredict;
+            }
+            if (run.predict && out.hasGenerated && out.fgEvaluated == multiplier - 1) {
+                ++generated;
+                for (unsigned sub = 1; sub < multiplier; ++sub) {
+                    sink::RgbaImage image;
+                    if (!sink::readRgba8(ctx, ring, graph.generatedFrameResource(out.genSlot + (sub - 1) * 2), image) || image.width != W || image.height != H) { ok = false; break; }
+                    if (i == 3) sink::saveImage((std::filesystem::path(argv[1]) / (L"forecast-" + std::to_wstring(multiplier) + L"x-" + std::to_wstring(sub) + L".png")).wstring(), image);
+                    // Where the square really is at the forecast's time, against holding the newest real frame.
+                    const auto truth = picture(squareAt(i) + double(Step) * double(sub) / double(multiplier));
+                    const double forecastDb = psnr(image.pixels, truth), holdDb = psnr(now, truth);
+                    ++checked; notWorse += forecastDb >= holdDb - 0.05; nearer += forecastDb > holdDb + 1.0; worstAgainstHold = std::min(worstAgainstHold, forecastDb - holdDb);
+                    if (i <= 2) std::cout << "PUSHFLOW_GRAPH " << tag << " frame=" << i << " sub=" << sub << " forecast " << forecastDb << " dB, holding the real frame " << holdDb << " dB" << std::endl;
+                }
+                previous = now;
+                continue;
+            }
             if (out.hasGenerated && out.fgEvaluated == multiplier - 1) {
                 ++generated;
                 const auto mix = blend(previous, now);
@@ -139,12 +202,22 @@ int wmain(int argc, wchar_t** argv) {
                 for (unsigned sub = 1; sub < multiplier; ++sub) {
                     sink::RgbaImage image;
                     if (!sink::readRgba8(ctx, ring, graph.generatedFrameResource(out.genSlot + (sub - 1) * 2), image) || image.width != W || image.height != H) { ok = false; break; }
-                    if (i == 3) sink::saveImage((std::filesystem::path(argv[1]) / (L"generated-" + std::to_wstring(multiplier) + L"x-" + std::to_wstring(sub) + L".png")).wstring(), image);
+                    if (i == 3) sink::saveImage((std::filesystem::path(argv[1]) / (L"generated-" + std::to_wstring(multiplier) + L"x-" + std::to_wstring(sub) + (run.motion ? L"-motion" : L"") + L".png")).wstring(), image);
                     // Where the square truly is at this subframe's time, against a plain blend of the two frames.
                     const auto truth = picture(squareAt(i - 1) + double(Step) * double(sub) / double(multiplier));
                     const double flowDb = psnr(image.pixels, truth), blendDb = psnr(mix, truth);
                     ++checked; between += flowDb > blendDb + 2.0; worstMargin = std::min(worstMargin, flowDb - blendDb);
                     if (i <= 2) std::cout << "PUSHFLOW_GRAPH " << tag << " frame=" << i << " sub=" << sub << " generated " << flowDb << " dB, blend " << blendDb << " dB" << std::endl;
+                    if (multiplier == 3 && !run.motion && !run.cache && !run.guard) plain3x[{i, sub}] = image.pixels;
+                    if (run.cache || run.guard) {
+                        const auto found = plain3x.find({i, sub});
+                        int worst = 255;
+                        if (found != plain3x.end() && found->second.size() == image.pixels.size()) {
+                            worst = 0;
+                            for (size_t k = 0; k < image.pixels.size(); ++k) worst = std::max(worst, std::abs(int(image.pixels[k]) - int(found->second[k])));
+                        }
+                        ++cacheChecked; cacheSame += worst <= 1; cacheWorst = std::max(cacheWorst, worst);
+                    }
                     subs.push_back(std::move(image.pixels));
                 }
                 if (ok && multiplier == 3 && subs.size() == 2) {
@@ -160,9 +233,43 @@ int wmain(int argc, wchar_t** argv) {
         check(resetsWithoutFrame == 1, tag + ": the first frame (a reset) has no generated frame");
         check(pairs > 0 && offered == pairs, tag + ": every pair after the first is offered to PushFlow (" + std::to_string(offered) + "/" + std::to_string(pairs) + ")");
         check(pairs > 0 && generated == pairs, tag + ": and comes back with its generated frames (" + std::to_string(generated) + "/" + std::to_string(pairs) + ")");
-        check(checked > 0 && between == checked, tag + ": each generated frame shows the square between its neighbours (" + std::to_string(between) + "/" + std::to_string(checked) +
-                                                     ", worst margin over a blend " + std::to_string(worstMargin) + " dB)");
-        if (multiplier == 3) check(generated > 0 && ordered == generated, tag + ": the two generated frames of a pair are in order (" + std::to_string(ordered) + "/" + std::to_string(generated) + ")");
+        if (run.predict) {
+            const auto summary = graph.pushFlowSummary();
+            check(pairs > 0 && realFirst == pairs && forecastsInOrder == pairs, tag + ": every batch holds the real frame first and its forecasts after it, in order (" + std::to_string(realFirst) + ", " +
+                                                                                std::to_string(forecastsInOrder) + " of " + std::to_string(pairs) + ")");
+            check(checked > 0 && notWorse == checked, tag + ": no forecast is further from where the square really is than the real frame before it (" + std::to_string(notWorse) + "/" +
+                                                      std::to_string(checked) + ", worst " + std::to_string(worstAgainstHold) + " dB)");
+            std::cout << "PUSHFLOW_GRAPH " << tag << " forecasts clearly nearer than holding: " << nearer << "/" << checked << "; forecasts counted " << summary.predictFrames << ", pixels counted "
+                      << summary.predictCounted << ", moving " << summary.predictMoving << ", held " << summary.predictHeld << std::endl;
+            // One run of the network for a pair, however many forecasts are made from it.
+            check(summary.predictFrames > 0, tag + ": the forecasts are counted");
+            // It steps aside without anything being rebuilt: the next pair is an ordinary one again.
+            graph.setPushFlowPredictPaused(true);
+            check(!graph.pushFlowPredicting(), tag + ": it steps aside when asked to (a measurement is running)");
+            graph.setPushFlowPredictPaused(false);
+            check(graph.pushFlowPredicting(), tag + ": and comes back");
+        } else {
+            check(pairs > 0 && plainOrder == pairs && realFirst == 0, tag + ": every batch ends with its real frame, as it always did (" + std::to_string(plainOrder) + "/" + std::to_string(pairs) + ")");
+            check(checked > 0 && between == checked, tag + ": each generated frame shows the square between its neighbours (" + std::to_string(between) + "/" + std::to_string(checked) +
+                                                         ", worst margin over a blend " + std::to_string(worstMargin) + " dB)");
+            if (multiplier == 3) check(generated > 0 && ordered == generated, tag + ": the two generated frames of a pair are in order (" + std::to_string(ordered) + "/" + std::to_string(generated) + ")");
+        }
+        if (run.guard) {
+            const auto summary = graph.pushFlowSummary();
+            check(cacheChecked == checked && cacheChecked > 0 && cacheSame == cacheChecked, tag + ": a followed object leaves every generated frame as PushFlow makes it without Guard (" + std::to_string(cacheSame) + "/" +
+                                                                                             std::to_string(cacheChecked) + ", worst difference " + std::to_string(cacheWorst) + " of 255)");
+            check(summary.guardFrames > 0 && summary.guardMended == 0 && summary.guardHeld == 0,
+                  tag + ": judged " + std::to_string(summary.guardFrames) + " frames, mended " + std::to_string(summary.guardMended) + ", held " + std::to_string(summary.guardHeld));
+        }
+        if (run.cache) {
+            const auto summary = graph.pushFlowSummary();
+            check(cacheChecked == checked && cacheChecked > 0 && cacheSame == cacheChecked, tag + ": every generated frame is the one PushFlow makes without the cache (" + std::to_string(cacheSame) + "/" +
+                                                                                             std::to_string(cacheChecked) + ", worst difference " + std::to_string(cacheWorst) + " of 255)");
+            // Every pair after the first uses the features its first frame left behind; each real frame is encoded once.
+            check(pairs > 1 && summary.featuresMade == 1 && summary.featuresKept == pairs - 1 && summary.encoderRuns == pairs + 1,
+                  tag + ": one encoder run per real frame (" + std::to_string(summary.encoderRuns) + " runs for " + std::to_string(pairs) + " pairs, kept " + std::to_string(summary.featuresKept) +
+                  ", made " + std::to_string(summary.featuresMade) + ")");
+        }
         std::cout << "PUSHFLOW_GRAPH " << tag << " pairs=" << pairs << " offered=" << offered << " generated=" << generated << " checked=" << checked << " slowestFrameMs=" << slowestMs << std::endl;
         ring.drainQueue(); graph.shutdown();
     }

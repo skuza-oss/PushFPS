@@ -45,6 +45,15 @@ engine::PushCanvas QmlPlayerBridge::pushCanvas(int fit) const {
     // canvasStretch: the layout editor stretched the game picture to its box (Ctrl resize).
     c.fit = impl_->prefBool("canvasStretch", false) ? engine::PushCanvasFit::Stretch : engine::PushCanvasFit(std::clamp(fit, 0, 2));
     c.background = uint32_t(impl_->prefInt("canvasBackground", 0)) & 0xFFFFFFu;
+    // PushFPS crop and resize (View.cpp): with "also in recordings and streams" on, the outputs cut the
+    // same sides as the screen. Off (the default) they keep the whole picture, as they always did.
+    if (impl_->prefBool("pushCropOutputs", false)) {
+        const auto crop = pushCropValues();
+        if (crop[0] || crop[1] || crop[2] || crop[3]) {
+            c.cropLeft = crop[0] / 1000.0f; c.cropTop = crop[1] / 1000.0f;
+            c.cropRight = crop[2] / 1000.0f; c.cropBottom = crop[3] / 1000.0f;
+        }
+    }
     return c.sanitized();
 }
 

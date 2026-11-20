@@ -9,6 +9,8 @@
 #include "veyra/sink/SoundProfile.h"
 #include "veyra/pipeline/NisSettings.h"
 #include "veyra/pipeline/PushEnhanceShape.h"
+#include "veyra/pushflow/PushFlow2.h"
+#include "veyra/pushflow/PushFlowMotion.h"
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QJsonParseError>
@@ -245,9 +247,16 @@ bool QmlPlayerBridge::setPreference(const QString& key, const QVariant& value) {
         // turn (100 = as the model made it), and the soft limits on brightening and darkening (0 = none).
         {"pushShapeShadows", {0, 200}}, {"pushShapeMidtones", {0, 200}}, {"pushShapeHighlights", {0, 200}}, {"pushShapeHue", {0, 200}},
         {"pushShapeMaxBrighten", {0, 100}}, {"pushShapeMaxDarken", {0, 100}},
-        // PushFPS comparison clip: length in seconds, layout 0 split picture / 1 side by side.
+        // PushFPS comparison clip: length in seconds, layout 0 split picture / 1 side by side /
+        // 2 vertical / 3 reveal, the height Split and Reveal clips are recorded at (0 automatic, else
+        // 1080, 1440 or 2160: the bridge takes only those), and how often Reveal's line sweeps (seconds).
         {"pushCompareSeconds", {5, 120}},
-        {"pushCompareLayout", {0, 2}},
+        {"pushCompareLayout", {0, 3}},
+        {"pushCompareQuality", {0, 2160}},
+        // PushFPS: the size PushFlow works the motion out at, apart from its tier (pushflow/PushFlowMotion.h):
+        // 0 the tier's own (the default), else 540, 720 or 1080 lines; only those are taken.
+        {"pushFlowMotion", {0, 1080}},
+        {"pushCompareRevealSeconds", {1, 8}},
         // Network sources (#48): seconds to collect before the first picture; -1 follows the buffer level.
         {"networkPrebuffer", {-1, 60}},
         // Live recording: the target bitrate for the file, and the frame rate
@@ -286,6 +295,9 @@ bool QmlPlayerBridge::setPreference(const QString& key, const QVariant& value) {
         {"recordBitrateKbps", {0, 400000}},
         {"canvasX", {-1000, 1000}}, {"canvasY", {-1000, 1000}}, {"canvasW", {20, 3000}}, {"canvasH", {20, 3000}},
         {"canvasCropL", {0, 450}}, {"canvasCropT", {0, 450}}, {"canvasCropR", {0, 450}}, {"canvasCropB", {0, 450}},
+        // PushFPS crop and resize of the console picture (View.cpp pushCropValues, PushCrop.js).
+        {"pushCropL", {0, 450}}, {"pushCropT", {0, 450}}, {"pushCropR", {0, 450}}, {"pushCropB", {0, 450}},
+        {"pushCropZoom", {25, 400}}, {"pushCropX", {-1000, 1000}}, {"pushCropY", {-1000, 1000}},
         {"canvasBackground", {0, 0xFFFFFF}}};
     static const QStringList flags{"canvasStretch", "recordHevc", "recordAdvanced", "recordAudio", "recordMic", "recordMicTrack", "replayEnabled", "subtitleEnabled", "subtitleBackground", "subtitleFit",
                                    "subtitleSecondLanguage", "audioForceStereo", "captureAudioMonitor", "holdCompare",
@@ -298,6 +310,8 @@ bool QmlPlayerBridge::setPreference(const QString& key, const QVariant& value) {
                                    "pushLatencyOverlay", "pushAutoFullscreen", "pushAlwaysOnTop", "pushSunset",
                                    // PushFPS ambient fill (engine/PushAmbient.h): the bars beside the picture.
                                    "pushAmbientFill",
+                                   // PushFPS crop and resize: the switch, and whether recordings and streams follow.
+                                   "pushCropOn", "pushCropOutputs",
                                    // PushFPS quick setup: the fine-tuning sliders of AI picture enhancement are unfolded.
                                    "pushFineTuneOpen",
                                    // PushFPS: smooth frame pacing (quick setup); set once by the 2.9.7 default.
@@ -323,6 +337,7 @@ bool QmlPlayerBridge::setPreference(const QString& key, const QVariant& value) {
         bool ok = false; const int n = value.toInt(&ok);
         const auto [low, high] = ranges.value(key);
         if (!ok || n < low || n > high) return false;
+        if (key == QLatin1String("pushFlowMotion") && !pushflow::motion::motionHeightValid(n)) return false;
         stored = n;
     } else if (flags.contains(key)) {
         stored = value.toBool();
@@ -445,6 +460,12 @@ bool QmlPlayerBridge::setPreference(const QString& key, const QVariant& value) {
         QJsonParseError error{};
         const QJsonDocument doc = QJsonDocument::fromJson(v.toUtf8(), &error);
         if (error.error != QJsonParseError::NoError || !doc.isObject()) return false;
+        stored = v;
+    } else if (key == QLatin1String("pushFlow2")) {
+        // PushFPS: PushFlow 2's experiment switches (pushflow/PushFlow2.h): a small JSON object of yes/no
+        // values. Only text that reads as that is stored; what does not would read as "everything off".
+        const QString v = value.toString();
+        if (v.size() > 1024 || !pushflow2::parse(v.toStdString()).ok) return false;
         stored = v;
     } else if (key == QLatin1String("pushGamePresets") || key == QLatin1String("pushBenchmark") || key == QLatin1String("pushLowestLatency") ||
                key == QLatin1String("studioScenes") || key == QLatin1String("pushOptimizeRestore") || key == QLatin1String("pushFlowHalfProbe") ||
@@ -580,8 +601,10 @@ void QmlPlayerBridge::applyPreference(const QString& key) {
              key == QLatin1String("mixDesktopMuted") || key == QLatin1String("mixAuxOn") || key == QLatin1String("mixAuxDb") ||
              key == QLatin1String("mixAuxMuted") || key == QLatin1String("mixAuxDevice"))
         applyPushMix();
-    else if (key.startsWith(QLatin1String("canvas")))
-        engine::setPushLiveCanvas(pushCanvas(0));   // PushFPS layout editor: applies to running outputs
+    else if (key.startsWith(QLatin1String("canvas")) || key.startsWith(QLatin1String("pushCrop")))
+        // PushFPS layout editor, and the crop of the console picture when outputs follow it: applies to
+        // running outputs. (The screen follows the crop at the next tick, in applyAspect.)
+        engine::setPushLiveCanvas(pushCanvas(0));
     else if (key == QLatin1String("pushFlowHalf")) {
         // Read by PushFlowBackend::initialize: applies the next time PushFlow starts. A value a developer
         // set before starting PushFPS (VEYRA_PUSHFLOW_PRECISION=fp16) is left alone.
@@ -589,6 +612,24 @@ void QmlPlayerBridge::applyPreference(const QString& key) {
         const DWORD n = GetEnvironmentVariableW(L"VEYRA_PUSHFLOW_PRECISION", current, 32);
         if (n == 0 || std::wstring_view(current) == L"fp16-checked")
             SetEnvironmentVariableW(L"VEYRA_PUSHFLOW_PRECISION", impl_->prefBool("pushFlowHalf", false) ? L"fp16-checked" : nullptr);
+    }
+    else if (key == QLatin1String("pushFlow2")) {
+        // Read when the graph is described, like the motion size below: a part switched on or off while
+        // PushFlow plays rebuilds PushFlow. Text that does not read (a damaged file) is everything off.
+        const auto flags = pushflow2::parse(impl_->prefs.value(QStringLiteral("pushFlow2")).toString().toStdString()).flags;
+        const bool changed = !(pushflow2::requested() == flags);
+        pushflow2::setRequested(flags);
+        if (changed && impl_->snapshot.running && settings().multiplier > 1 &&
+            settings().frameGenerationBackend == engine::FrameGenerationBackend::PushFlow) impl_->engine.refreshGraph();
+    }
+    else if (key == QLatin1String("pushFlowMotion")) {
+        // Read when the graph is described. While PushFlow is the method in use, the engine is asked to
+        // describe the graph again, which rebuilds it at the new motion size.
+        const int lines = impl_->prefInt("pushFlowMotion", 0);
+        const bool changed = pushflow::motion::motionHeight() != (pushflow::motion::motionHeightValid(lines) ? lines : 0);
+        pushflow::motion::setMotionHeight(lines);
+        if (changed && impl_->snapshot.running && settings().multiplier > 1 &&
+            settings().frameGenerationBackend == engine::FrameGenerationBackend::PushFlow) impl_->engine.refreshGraph();
     }
     else if (key.startsWith(QLatin1String("pushShape"))) {
         // Live: the graph reads these at every frame (no rebuild).

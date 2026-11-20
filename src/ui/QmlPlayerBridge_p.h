@@ -9,6 +9,7 @@
 #include "veyra/ngx/DlssgLite.h"
 #include "veyra/RuntimePaths.h"
 #include "veyra/ui/GamePassthrough.h"
+#include <array>
 #include <QAbstractNativeEventFilter>
 #include <QGuiApplication>
 #include <QScreen>
@@ -18,6 +19,7 @@
 #include <QScopedValueRollback>
 #include "veyra/ui/EffectAvailability.h"
 #include "veyra/engine/FrameGenerationSelection.h"
+#include "veyra/engine/PushFgHealth.h"
 #include "veyra/ui/QmlExportQueueModel.h"
 #include "veyra/ui/PlaylistModel.h"
 #include "veyra/ui/UpdateChecker.h"
@@ -225,10 +227,16 @@ struct QmlPlayerBridge::Impl {
         int starved = 0, settledSeconds = 0;
         uint64_t loweredRevision = 0;   // the revision this watch's own tier change produced
         int loweredFrom = -1;           // the tier it lowered from (a user raising it again stops the watch)
+        int motionFrom = 0;             // the chosen motion size it put back to automatic (choosing it again stops the watch)
         bool userChose = false, slowNoticeShown = false, awaitingOwn = false;
         int cadenceSeconds = 0;         // the cadence notice: seconds of 60 measured for a 30 FPS game
         uint64_t cadenceSession = 0;
     } pushFlowWatch;
+    // PushFPS frame generation health (engine/PushFgHealth.h): fed once a second by pushFlowBudgetWatch.
+    engine::PushFgHealth fgHealth;
+    int fgIdle = 0;                 // the cause it reports now (engine::PushFgIdle), for pushLiveStats
+    uint64_t fgIdleSession = 0;     // the source a notice was last shown for
+    int fgIdleNotified = 0;         // and the cause it named
     QProcess* pushFlowHalfTest = nullptr;   // PushFlowBench --fp16-probe while it runs
     // PushFPS crash notice and graphics card test (bridge/PushTools.cpp).
     QVariantMap pushCrashReport;            // what the previous run left behind; empty: it did not crash
@@ -436,6 +444,11 @@ struct QmlPlayerBridge::Impl {
     bool captureDriverSettingsOpen = false;
     std::wstring captureDriverFormatKey;
     int captureQueryKind = 0;   // 0 device list, 1 formats, 2 formats then connect (continue)
+    // PushFPS: when the running query began, and whether its "still waiting" note has been shown.
+    // A query waits on the devices' drivers; one that does not answer used to leave the capture
+    // dialog busy with no word of why (Capture.cpp tickCapture).
+    std::chrono::steady_clock::time_point captureQueryStarted{};
+    bool captureQuerySlowNoted = false;
     std::vector<source::CaptureDevice> captureVideo, captureAudio;
     std::vector<source::CaptureFormat> captureFormatList;
     // The capture dialog's lists are built once per input. QML re-reads a list property on
@@ -665,6 +678,7 @@ struct QmlPlayerBridge::Impl {
     bool compareBase = false;
     double compareSplit = 0.5;
     int aspectMode = 0, aspectApplied = 0;
+    std::array<int, 7> pushCropApplied{0, 0, 0, 0, 100, 0, 0};   // PushFPS crop and resize, as last given to the view
     uint64_t aspectSession = 0;
     std::jthread gpuSampler;                 // joined before gpuUtil goes away
     std::filesystem::path prefsFile() const { return dataDir / L"qml-preferences.v1.json"; }
@@ -1016,6 +1030,7 @@ struct QmlPlayerBridge::Impl {
 uint32_t primaryGpuVendor();
 bool fsr4Possible();
 const DXGI_ADAPTER_DESC1* engineAdapterDesc();
+QString engineAdapterDriverVersion();   // "a.b.c.d" of that adapter, empty when unknown (Hardware.cpp)
 bool vfgHardwarePossible();
 unsigned normalizeFgMultiplier(unsigned value, engine::FrameGenerationBackend backend, unsigned cap);
 QString fgEffectId(engine::FrameGenerationBackend backend);

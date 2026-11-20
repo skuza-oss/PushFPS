@@ -56,6 +56,26 @@ int main() {
     check(perfect.psnr == 100.0 && perfect.blendPsnr < 60 && perfect.badShare == 0, "perfect generation beats the blend");
     const Sample repeat = measure(a, b, a, c, Fit{1, 0, true}, {});
     check(repeat.psnr < perfect.psnr && repeat.meanError > 0 && repeat.badShare > 0, "repeating the previous frame is scored as wrong");
+    // The worst place: an object missing from one tile is nearly invisible in the whole-picture PSNR
+    // and plain in that tile.
+    {
+        Luma scene = b, missing = b;
+        // A bright 16 x 16 object (a tenth of the picture's height) inside one tile, absent from `missing`.
+        for (uint32_t gy = 82; gy < 98; ++gy) for (uint32_t gx = 142; gx < 158; ++gx) scene.y[size_t(gy) * kGridW + gx] = 0.95f;
+        const double whole = psnr(missing, scene), place = worstTilePsnr(missing, scene);
+        check(whole > 24 && place < 12 && whole - place > 14, "a missing object: the picture " + std::to_string(whole) + " dB, its place " + std::to_string(place) + " dB");
+        check(worstTilePsnr(scene, scene) == 100.0, "identical pictures have no weak place");
+        check(worstTilePsnr(a, Luma{}) == 0, "an invalid grid gives no value");
+        Luma even = b; for (auto& v : even.y) v += 0.01f;
+        check(std::abs(worstTilePsnr(even, b) - psnr(even, b)) < 0.01, "an error spread evenly is the same in every tile");
+        const Sample lost = measure(missing, scene, a, c, Fit{1, 0, true}, {}), fine = measure(scene, scene, a, c, Fit{1, 0, true}, {});
+        check(lost.worstTile < 12 && fine.worstTile == 100.0, "each sample carries its worst place");
+        const Report both = summarize({fine, lost, fine, fine}, 60, 4, 4, 4);
+        check(std::abs(both.worstFramePsnr - lost.psnr) < 1e-9 && both.worstPlacePsnr < 20 && both.worstPlacePsnr > lost.worstTile && both.psnr > both.worstFramePsnr,
+              "the report keeps the worst frame, and the worst place averaged as error (" + std::to_string(both.worstPlacePsnr) + " dB)");
+        const Report one = summarize({fine}, 60, 1, 1, 1), two = summarize({fine, lost}, 60, 2, 2, 2);
+        check(one.score() == summarize({fine, fine}, 60, 2, 2, 2).score() && two.score() > 0, "the score is made from what it always was made from");
+    }
     // HUD boxes: an error only inside the box shows there, not much in the whole picture.
     Luma hudBroken = b;
     for (uint32_t gy = 0; gy < 18; ++gy) for (uint32_t gx = 0; gx < 32; ++gx) hudBroken.y[size_t(gy) * kGridW + gx] = 1.0f;

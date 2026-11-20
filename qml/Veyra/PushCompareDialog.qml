@@ -5,11 +5,16 @@
 // (pushStartCompareClip, engine/RecordingCompare.h). Split: one picture cut down
 // the middle. Side by side: the whole picture twice, each at half size, with the
 // FPS labels in the black bar above each. Vertical: a 9:16 clip for TikTok, Shorts
-// and Reels, the console on top and PushFPS below, labels next to the divider. Every
+// and Reels, the console on top and PushFPS below, labels next to the divider. Reveal:
+// the whole picture, first at the console's rate, then a line sweeps across and
+// uncovers PushFPS, and back, every few seconds (the preview plays it). Every
 // layout labels each side with its frame rate. Dialog key "compare"; opened from the
 // quick setup's comparison tile. Preferences pushCompareLayout (0 split, 1 side by
-// side, 2 vertical), pushCompareSeconds (10 to 120) and pushCompareUntilStop (no timer:
-// the clip runs until it is stopped; the same for every layout). PushCompareClip.js reads them.
+// side, 2 vertical, 3 reveal), pushCompareSeconds (10 to 120), pushCompareUntilStop (no
+// timer: the clip runs until it is stopped; the same for every layout), and for the
+// layouts that fill the frame (split, reveal) pushCompareQuality (0 automatic, 1080,
+// 1440, 2160); Reveal also has pushCompareRevealSeconds (a sweep every 1 to 8 seconds).
+// PushCompareClip.js reads them all.
 import QtQuick
 import QtQuick.Layouts
 import "PushCompareClip.js" as Clip
@@ -26,11 +31,24 @@ DialogLayer {
 
     readonly property var lengths: Clip.lengths
     readonly property bool untilStop: Clip.untilStop(veyra.preferences)
-    readonly property int layoutId: {
-        const n = Number(veyra.preferences.pushCompareLayout || 0)
-        return n === 1 || n === 2 ? n : 0
-    }
+    readonly property int layoutId: Clip.layout(veyra.preferences)
     readonly property int seconds: Clip.seconds(veyra.preferences)
+    // Split and Reveal: the height the clip is recorded at (0 automatic). Reveal: a sweep every so many seconds.
+    readonly property bool takesQuality: Clip.takesQuality(cmp.layoutId)
+    readonly property int quality: Clip.quality(veyra.preferences)
+    readonly property bool reveal: cmp.layoutId === 3
+    readonly property int revealEvery: Clip.revealEvery(veyra.preferences)
+    // The preview's clock, in seconds of a clip: runs while the Reveal preview is on screen. It
+    // wraps after 240 s, a whole number of sweeps there and back for every interval offered
+    // (2, 4, 6, 10 and 16 s), so the preview never jumps, also when the interval is changed.
+    property real revealClock: 0
+    readonly property real revealShare: Clip.revealPosition(cmp.revealClock, cmp.revealEvery)
+    NumberAnimation on revealClock {
+        running: cmp.shown && cmp.reveal
+        from: 0; to: 240
+        duration: 240000
+        loops: Animation.Infinite
+    }
     // For the preview only: the recording measures the real rates when it starts.
     readonly property int gameFps: {
         const n = Number(veyra.preferences.pushGameFps || 30)
@@ -45,12 +63,21 @@ DialogLayer {
 
     // The preview drawn: portrait for the vertical layout, landscape for the others.
     readonly property bool verticalPreview: cmp.layoutId === 2
-    function layoutName(id) { return id === 2 ? qsTr("竖屏") : id === 1 ? qsTr("并排") : qsTr("分屏") }
+    function layoutName(id) { return id === 3 ? qsTr("滑动揭示") : id === 2 ? qsTr("竖屏") : id === 1 ? qsTr("并排") : qsTr("分屏") }
     function layoutHint(id) {
-        return id === 2 ? qsTr("竖屏 9:16，适合 TikTok、Shorts 和 Reels：上面是原帧率，下面是 PushFPS，各占半屏（取画面中间部分）")
+        return id === 3 ? qsTr("整个画面：先是原帧率，一条线从左扫到右露出 PushFPS，停一会儿再扫回去，如此反复")
+             : id === 2 ? qsTr("竖屏 9:16，适合 TikTok、Shorts 和 Reels：上面是原帧率，下面是 PushFPS，各占半屏（取画面中间部分）")
              : id === 1 ? qsTr("完整画面并排两份：左边是原帧率，右边是 PushFPS")
              : qsTr("同一个画面从中间分开：左半边是原帧率，右半边是 PushFPS")
     }
+    function qualityLabel(height) { return height > 0 ? Clip.qualityName(height) : qsTr("自动") }
+    function qualityHint(height) {
+        return height === 2160 ? qsTr("最高按 4K 录制，每一帧都录：需要较强的显卡。若有帧没录下，录完会提示，请选低一档")
+             : height > 0 ? qsTr("最高按所选的高度录制（画面本身更小时保持原样，不放大），并用更高的码率")
+             : qsTr("按画面原本的大小录制，最高 1440p")
+    }
+    // Reveal preview: where the line is (x in the preview), as the clip moves it.
+    function revealX(share, previewWidth) { return Math.max(0, Math.min(1, share)) * previewWidth }
     // Vertical preview (portrait, 108 x 192): where each label goes, centred just above (index 0)
     // and just below (index 1) the divider in the middle, as the clip puts them.
     function verticalTagY(index, tagHeight, previewHeight) {
@@ -81,11 +108,12 @@ DialogLayer {
         clip: true
         visible: !cmp.verticalPreview
         readonly property bool sideBySide: cmp.layoutId === 1
+        readonly property bool reveal: cmp.reveal
         readonly property real picW: sideBySide ? width / 2 : width / 2
         readonly property real picH: sideBySide ? height / 2 : height
         readonly property real picTop: sideBySide ? height / 4 : 0
         Repeater {
-            model: 2
+            model: preview.reveal ? 0 : 2
             delegate: Item {
                 required property int index
                 x: index === 0 ? 0 : preview.width / 2
@@ -109,14 +137,87 @@ DialogLayer {
             }
         }
         Rectangle {
+            visible: !preview.reveal
             x: preview.width / 2 - 1
             y: preview.picTop
             width: 2
             height: preview.picH
             color: "#ffffff"
         }
+        // Reveal: the whole picture; right of the line the original (drawn dimmer here), left of it
+        // PushFPS. The line moves as the clip moves it, and each label is cut off at the line.
+        Item {
+            id: revealPreview
+            objectName: "pushfps-compare-preview-reveal"
+            anchors.fill: parent
+            visible: preview.reveal
+            readonly property real lineX: cmp.revealX(cmp.revealShare, width)
+            Rectangle {
+                anchors.fill: parent
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: "#3d6fa8" }
+                    GradientStop { position: 0.55; color: "#9cc3e6" }
+                    GradientStop { position: 0.56; color: "#4b5a3a" }
+                    GradientStop { position: 1.0; color: "#2c3324" }
+                }
+            }
+            Rectangle {
+                x: revealPreview.lineX
+                width: Math.max(0, revealPreview.width - x)
+                height: parent.height
+                color: "#47000000"
+            }
+            // PushFPS's label at the top left, shown as far as the line; the original's at the top right, from the line on.
+            Item {
+                x: 0; width: revealPreview.lineX; height: parent.height
+                clip: true
+                Rectangle {
+                    objectName: "pushfps-compare-reveal-tag-push"
+                    x: 6; y: 6
+                    width: revealPushText.implicitWidth + 16
+                    height: revealPushText.implicitHeight + 6
+                    radius: height / 2
+                    border.width: 1
+                    border.color: "#8df237"
+                    color: "#d60e0f12"
+                    Text { id: revealPushText; anchors.centerIn: parent; text: cmp.rightTag; color: "#ffffff"; font.family: Theme.fontUi; font.pixelSize: 10; font.weight: Font.Bold }
+                }
+            }
+            Item {
+                x: revealPreview.lineX; width: Math.max(0, revealPreview.width - x); height: parent.height
+                clip: true
+                Rectangle {
+                    objectName: "pushfps-compare-reveal-tag-original"
+                    x: revealPreview.width - width - 6 - revealPreview.lineX; y: 6
+                    width: revealOriginalText.implicitWidth + 16
+                    height: revealOriginalText.implicitHeight + 6
+                    radius: height / 2
+                    border.width: 1
+                    border.color: "#4dffffff"
+                    color: "#d60e0f12"
+                    Text { id: revealOriginalText; anchors.centerIn: parent; text: cmp.leftTag; color: "#ffffff"; font.family: Theme.fontUi; font.pixelSize: 10; font.weight: Font.Bold }
+                }
+            }
+            // The line: a white core in a green glow, with a round handle, as in the clip.
+            Item {
+                objectName: "pushfps-compare-reveal-line"
+                x: revealPreview.lineX - width / 2
+                width: 14; height: parent.height
+                visible: cmp.revealShare > 0.001 && cmp.revealShare < 0.999
+                Rectangle { anchors.horizontalCenter: parent.horizontalCenter; width: 8; height: parent.height; color: "#408df237" }
+                Rectangle { anchors.horizontalCenter: parent.horizontalCenter; width: 4; height: parent.height; color: "#808df237" }
+                Rectangle { anchors.horizontalCenter: parent.horizontalCenter; width: 2; height: parent.height; color: "#ffffff" }
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: 14; height: 14; radius: 7
+                    color: "#101216"
+                    border.width: 2
+                    border.color: "#8df237"
+                }
+            }
+        }
         Repeater {
-            model: 2
+            model: preview.reveal ? 0 : 2
             delegate: Rectangle {
                 required property int index
                 objectName: index === 0 ? "pushfps-compare-tag-left" : "pushfps-compare-tag-right"
@@ -207,9 +308,37 @@ DialogLayer {
             hintBelow: true
             VSeg {
                 objectName: "pushfps-compare-layout"
-                options: [0, 1, 2].map(n => ({ id: String(n), label: cmp.layoutName(n) }))
+                options: Clip.layouts.map(n => ({ id: String(n), label: cmp.layoutName(n) }))
                 current: String(cmp.layoutId)
                 onPicked: id => veyra.setPreference("pushCompareLayout", Number(id))
+            }
+        }
+        // Reveal: how often the line sweeps.
+        VRow {
+            objectName: "pushfps-compare-reveal-row"
+            visible: cmp.reveal
+            label: qsTr("扫过间隔")
+            hint: qsTr("线条每隔这么久扫过一次，在原帧率和 PushFPS 之间切换")
+            hintBelow: true
+            VSeg {
+                objectName: "pushfps-compare-reveal"
+                options: Clip.revealIntervals.map(n => ({ id: String(n), label: qsTr("%1 秒").arg(n) }))
+                current: String(cmp.revealEvery)
+                onPicked: id => veyra.setPreference("pushCompareRevealSeconds", Number(id))
+            }
+        }
+        // Split and Reveal fill the frame: the height the clip is recorded at.
+        VRow {
+            objectName: "pushfps-compare-quality-row"
+            visible: cmp.takesQuality
+            label: qsTr("片段画质")
+            hint: cmp.qualityHint(cmp.quality)
+            hintBelow: true
+            VSeg {
+                objectName: "pushfps-compare-quality"
+                options: Clip.qualities.map(n => ({ id: String(n), label: cmp.qualityLabel(n) }))
+                current: String(cmp.quality)
+                onPicked: id => veyra.setPreference("pushCompareQuality", Number(id))
             }
         }
         VRow {
@@ -240,6 +369,7 @@ DialogLayer {
         Layout.fillWidth: true
         Layout.topMargin: 10
         text: !veyra.hasSource ? qsTr("需要正在播放的画面")
+            : cmp.layoutId === 3 ? qsTr("画面上方标着当前显示的是哪一边和它的帧率。视频保存在录制文件夹里，可直接导入剪辑软件")
             : cmp.layoutId === 2 ? qsTr("两半都标有各自的帧率。保存为 1080×1920 视频，可直接上传到手机应用")
             : qsTr("两边上方都标有各自的帧率。视频保存在录制文件夹里，可直接导入剪辑软件")
         color: veyra.hasSource ? Theme.t3 : Theme.warn

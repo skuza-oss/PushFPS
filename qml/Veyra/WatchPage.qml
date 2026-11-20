@@ -87,8 +87,8 @@ VPage {
     readonly property int clipSeconds: CompareClip.seconds(veyra.preferences)
     readonly property bool clipUntilStop: CompareClip.untilStop(veyra.preferences)
     readonly property string clipLayout: {
-        const n = Number(veyra.preferences.pushCompareLayout || 0)
-        return n === 2 ? qsTr("竖屏") : n === 1 ? qsTr("并排") : qsTr("分屏")
+        const n = CompareClip.layout(veyra.preferences)
+        return n === 3 ? qsTr("滑动揭示") : n === 2 ? qsTr("竖屏") : n === 1 ? qsTr("并排") : qsTr("分屏")
     }
 
     RowLayout {

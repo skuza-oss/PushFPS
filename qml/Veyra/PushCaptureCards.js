@@ -3,13 +3,17 @@
 //
 // Capture cards and what is known about them in PushFPS. "tested" means a person
 // ran PushFPS (or Veyra, said so) with this card and a real console; nothing here
-// is inferred from specifications. The same list is in README.md; reports come in
+// is inferred from specifications. "reported" is a user's capture card report that
+// says the card works: the note gives the report's own console and graphics card,
+// and nothing the report did not say. The same list is in README.md; reports come in
 // through the "Capture card report" issue form.
 .pragma library
 
 var reportUrl = "https://github.com/DosukaSOL/PushFPS/issues/new?template=capture-card-report.yml"
 
-// match: lower-case fragments of the name Windows gives the device.
+// match: lower-case fragments of the name Windows gives the device. The first card that
+// matches wins, so a longer name stands before a shorter one it contains ("hd60 s+"
+// before "hd60 s").
 var cards = [
     { name: "Elgato 4K X", match: ["4k x"], status: "tested",
       note: "Tested by the PushFPS developer with an RTX 5090: frame generation on console games and videos." },
@@ -17,9 +21,14 @@ var cards = [
       note: "Tested by Veyra's developer (Veyra 2.1.6 measurements: 4K60 NV12 with an RTX 5070)." },
     { name: "Elgato HD60 X", match: ["hd60 x"], status: "tested", note: "Tested with PushFPS on a console." },
     { name: "Elgato 4K S", match: ["4k s"], status: "tested", note: "Tested with PushFPS on a console." },
+    { name: "Elgato HD60 S+", match: ["hd60 s+"], status: "untested", note: "" },
+    { name: "Elgato HD60 S", match: ["hd60 s"], status: "reported",
+      note: "Reported working by a user: PS5 at 1080p60 with a Radeon RX 7600 (PushFPS 3.2.2)." },
     { name: "Elgato 4K Pro / 4K60 Pro", match: ["4k pro", "4k60 pro"], status: "untested", note: "" },
     { name: "AVerMedia Live Gamer 4K 2.1 (GC575)", match: ["gc575", "live gamer 4k"], status: "untested", note: "" },
-    { name: "AVerMedia Live Gamer Ultra 2.1 (GC553G2)", match: ["gc553", "live gamer ultra"], status: "untested", note: "" },
+    { name: "AVerMedia Live Gamer Ultra 2.1 (GC553G2)", match: ["gc553g2", "ultra 2.1"], status: "reported",
+      note: "Reported working by a user: PS5 Pro with an RTX 4080 SUPER (PushFPS 3.2.5)." },
+    { name: "AVerMedia Live Gamer Ultra (GC553)", match: ["gc553", "live gamer ultra"], status: "untested", note: "" },
     { name: "Magewell USB Capture HDMI 4K Plus", match: ["usb capture hdmi 4k"], status: "untested",
       note: "Magewell cards have a native low-latency mode in Veyra." },
     { name: "Blackmagic DeckLink / UltraStudio", match: ["decklink", "ultrastudio"], status: "untested",

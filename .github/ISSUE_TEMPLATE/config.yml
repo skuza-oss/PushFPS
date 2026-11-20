@@ -1,5 +1,8 @@
 blank_issues_enabled: true
 contact_links:
+  - name: Discord
+    url: https://discord.gg/N88znNpSgC
+    about: Questions, help with your setup and clips. Other players and the developer answer here.
   - name: Website and download
     url: https://dosukasol.github.io/PushFPS/
     about: Setup guide, requirements, FAQ and the latest download.

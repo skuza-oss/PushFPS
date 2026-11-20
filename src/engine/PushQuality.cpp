@@ -126,6 +126,23 @@ double psnr(const Luma& a, const Luma& b, const std::vector<Box>* inside) {
     const double mse = sum / double(n);
     return mse <= 1e-10 ? 100.0 : std::min(100.0, 10.0 * std::log10(1.0 / mse));
 }
+double worstTilePsnr(const Luma& a, const Luma& b) {
+    if (!a.valid() || !b.valid()) return 0;
+    const uint32_t tw = kGridW / kTilesX, th = kGridH / kTilesY;
+    double worst = 0;   // the largest mean squared error among the tiles
+    for (uint32_t ty = 0; ty < kTilesY; ++ty)
+        for (uint32_t tx = 0; tx < kTilesX; ++tx) {
+            double sum = 0;
+            for (uint32_t gy = ty * th; gy < (ty + 1) * th; ++gy)
+                for (uint32_t gx = tx * tw; gx < (tx + 1) * tw; ++gx) {
+                    const size_t i = size_t(gy) * kGridW + gx;
+                    const double d = double(a.y[i]) - double(b.y[i]);
+                    sum += d * d;
+                }
+            worst = std::max(worst, sum / double(tw * th));
+        }
+    return worst <= 1e-10 ? 100.0 : std::min(100.0, 10.0 * std::log10(1.0 / worst));
+}
 double meanAbsError(const Luma& a, const Luma& b) {
     if (!a.valid() || !b.valid()) return 0;
     double sum = 0;
@@ -181,6 +198,7 @@ Sample measure(const Luma& generated, const Luma& original, const Luma& previous
     s.blendPsnr = baseline.valid() ? psnr(baseline, truth) : 0;
     s.meanError = meanAbsError(generated, truth);
     s.badShare = badPixelShare(generated, truth);
+    s.worstTile = worstTilePsnr(generated, truth);
     if (!hudBoxes.empty()) { s.hudPsnr = psnr(generated, truth, &hudBoxes); s.hud = s.hudPsnr > 0; }
     return s;
 }
@@ -213,6 +231,9 @@ Report summarize(const std::vector<Sample>& samples, double realPsnr, uint32_t r
     r.hudPsnr = meanDb([](const Sample& s) { return s.hudPsnr; }, [](const Sample& s) { return s.hud; });
     for (const auto& s : samples) { r.meanError += s.meanError; r.badShare += s.badShare; if (s.hud) ++r.hudSamples; }
     r.meanError /= double(samples.size()); r.badShare /= double(samples.size());
+    r.worstFramePsnr = samples.front().psnr;
+    for (const auto& s : samples) r.worstFramePsnr = std::min(r.worstFramePsnr, s.psnr);
+    r.worstPlacePsnr = meanDb([](const Sample& s) { return s.worstTile; }, [](const Sample& s) { return s.worstTile > 0; });
     return r;
 }
 

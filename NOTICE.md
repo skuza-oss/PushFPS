@@ -90,8 +90,9 @@ CORPORATION & AFFILIATES) under the MIT License, in `third_party/nis`; the licen
 The installer downloads Veyra's runtime package from Veyra's own release. By default it installs only files
 that may be passed on under their vendors' terms:
 
-- Files that say they are from NVIDIA but are not originals with a valid NVIDIA signature (in Veyra 2.1.5:
-  the community-modified DLSS build behind AI enhancement on RTX 30 cards) are not installed.
+- Files that say they are from NVIDIA but are not originals with a valid NVIDIA signature (the
+  community-modified DLSS build that AI picture enhancement runs on with NVIDIA RTX cards; the app lists it
+  as "RTX 20–50") are not installed.
 - On AMD installs, the AI enhancement runtimes that run NVIDIA's model on Radeon cards
   (`runtime\amd-nr-rdna3`, `runtime\amd-nr`) are not installed: NVIDIA licenses its DLSS runtimes for
   systems with NVIDIA graphics only. FSR and XeSS frame generation are not affected.

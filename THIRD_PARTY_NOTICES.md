@@ -1,5 +1,24 @@
 # Third-party dependencies
 
+## Remote Play feedback history backport (2026-11-17)
+
+`scripts/remoteplay/patches/0003-chiaki-feedback-history.patch` backports four
+chiaki-ng changes onto Veyra's unchanged `0e16950165f06e5c3291537c2eeba6e852be7120`
+dependency pin, including the upstream regression tests:
+
+- `4382c1c718271c0e2427196d13863a28d57c2038`: one packet per history event.
+- `bfbb2968a01238c4ee1611ceb79ee0025ca31267`: bounded tail resends and larger history.
+- `c938844a2fa7bbb9052656d83837cf98baff9ba5`: history event count in the Takion header.
+- `bc397a728bb430f28666129ef006f7a8ac0e6081`: count-minus-one header and event
+  sequence numbers; retransmits retain the same sequence.
+
+Source: https://github.com/chiaki-ng/chiaki-ng . License remains
+`LicenseRef-AGPL-3.0-only-OpenSSL`; see `licenses/remoteplay` and the upstream
+`COPYING`. The patch is a consolidated, otherwise unchanged backport. Local
+sender regression tests additionally exercise strike/modifier combinations,
+16-bit sequence wrap and a lost final release packet. Offline test results do
+not establish behavior on a physical PS5.
+
 ## RX 7000 experimental NR provider (2026-10-30, development branch)
 
 RedDukeDev/dlss5-nr-amd-custom, fixed commit `ab455d179922adc11f65675d399e1d553bf423f0`: MIT network layer and NR kernels; ZLUDA at `b135e233bb7a6ff7f8690e49701f87f4944adcee`, MIT OR Apache-2.0. Original notices, exact file selection, modifications and proprietary component boundaries are in [third_party/redduke/VEYRA_ORIGIN.md](third_party/redduke/VEYRA_ORIGIN.md) and its LICENSE. The five external source files are fetched and Git-blob verified by `scripts/amd-nr/prepare-rdna3-source.py`; no SDK, runtime DLL, model or translation cache enters source Git.
@@ -226,7 +245,16 @@ request the card's hardware tonemapper as OBS libdshowcapture
 (`SetVendorTonemapperUsage`, behaviour only, no code copied) does; the
 non-MK.2 P010 chroma rule is a per-source flag (`fullRangeChroma`) honoured by
 `YuvToLinearRgb.hlsl`, applied only when the user leaves range on auto. No
-vendor shader, SDK header or binary is vendored. Full license:
+vendor shader, SDK header or binary is vendored.
+2026-11-16: `readElgato4kxHdrPacket` adapts the Elgato 4K X source-HDR query
+from Nitlink at `f39b909517f95791d97e64463fc65e5be7a17fcc`,
+`src/capture/elgato_hdr_control.cpp` (`ReadXuBlocks`) and
+`elgato_4kx_source.h`: UVC extension unit GUID, selector 2/1 length and
+request/reply mailbox, readiness and HDR InfoFrame requests (Nitlink credits
+13bm/elgato4k-linux for the protocol; no code from that project is used).
+Veyra changes: uses the selected filter, sends one query per connection
+instead of polling, stops after a rejected first write, checks the reply
+framing and checksum, and validates the InfoFrame with the existing parser. Full license:
 `licenses/capture/ELGATO_NITLINK_MIT.txt`.
 
 ## NVENC API declarations

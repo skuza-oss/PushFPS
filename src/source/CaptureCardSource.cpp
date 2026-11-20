@@ -800,7 +800,15 @@ std::vector<CaptureDevice> CaptureCardSource::deviceDetails(bool audio){
         if(device.name.empty())device.name=L"Unknown capture device";
         device.path=monikerPath(moniker.Get());
         if(!audio){ComPtr<IBaseFilter> filter;ComPtr<IPin> audioPin;
-            if(SUCCEEDED(moniker->BindToObject(nullptr,nullptr,IID_PPV_ARGS(&filter)))&&SUCCEEDED(findAudioOutputPin(filter.Get(),audioPin)))device.hasEmbeddedAudio=true;
+            // PushFPS: opening a device's filter is the one step of this list that waits on the device's
+            // driver. Logged before and after, so a log that ends at "asking" names the device that did
+            // not answer (a report of the capture dialog waiting for ever, with nothing in the log).
+            const auto asked=std::chrono::steady_clock::now();
+            log::info("capture-devices",std::format("asking name=\"{}\" pathTag={}",narrowForLog(device.name),pathTag(device.path)));
+            const HRESULT bound=moniker->BindToObject(nullptr,nullptr,IID_PPV_ARGS(&filter));
+            if(SUCCEEDED(bound)&&SUCCEEDED(findAudioOutputPin(filter.Get(),audioPin)))device.hasEmbeddedAudio=true;
+            log::info("capture-devices",std::format("answered pathTag={} bindHr=0x{:08X} embeddedAudio={} ms={}",pathTag(device.path),uint32_t(bound),
+                device.hasEmbeddedAudio?1:0,std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-asked).count()));
         }
         result.push_back(std::move(device));
     }

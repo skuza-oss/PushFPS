@@ -8,11 +8,28 @@ real name or address on the certificate.
 | Route | Name on the certificate | Cost | Fits PushFPS? |
 |---|---|---|---|
 | **SignPath Foundation** (free for open source) | "SignPath Foundation" | Free | Probably not today, see below |
-| Microsoft Artifact Signing (was Trusted Signing) | Your legal name | ~US$10 a month | Individuals only in the USA and Canada; shows your name |
+| Microsoft Artifact Signing (was Trusted Signing) | Your legal name, or a registered organisation's name | ~US$10 a month | Individuals only in the USA and Canada. Organisations in the USA, Canada, the EU and the UK (checked 19 November 2026): a registered company's name would stand on the certificate instead of a person's |
 | Certum "Open Source Developer" and other CA certificates | Your legal name | €25 to €500 a year | Shows your name |
+| Microsoft Store (MSIX package) | The Store signs the package | Free (registration is free for individuals and companies) | Not explored: PushFPS would have to ship as an MSIX package, and the runtime and optional extras it downloads today do not fit that as they are |
 
-Only SignPath Foundation keeps the owner's identity off the certificate, so it is the only route that
-meets the privacy requirement.
+Only SignPath Foundation keeps every legal name off the certificate; a company's certificate keeps the
+owner's personal name off it. An "EV" certificate is not worth its price for this any more: since 2024
+Windows treats it like any other certificate, and a newly signed file still starts without reputation.
+
+## Until a release is signed: report the false positive, every release
+
+Windows Defender's cloud check flags new unsigned downloads by how they look (`Trojan:Win32/Tecabans.STV!cl`
+on PushFPS's zip). Microsoft clears a file that is reported, but the next release is a new file, so:
+
+1. https://www.microsoft.com/wdsi/filesubmission, signed in with a Microsoft account, as **Software developer**.
+2. Upload `PushFPS-<version>-win64.zip` from the release page. Choose *Incorrectly detected as malware*
+   and give the detection name Defender showed.
+3. In the comment: open source, the repository URL, the file's SHA-256 from `SHA256SUMS.txt`, built by
+   GitHub Actions from the tagged commit.
+4. Keep the submission ID. If the answer is "not malware" but the detection stays, submit once more and
+   quote that ID.
+
+Only the owner can do this (it is tied to an account), and nothing in the repository can replace it.
 
 ## Why SignPath Foundation will probably say no (as of November 2026)
 

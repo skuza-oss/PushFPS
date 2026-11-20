@@ -203,13 +203,14 @@ jobs:
         run: |
           git config --global core.autocrlf false
           git config --global advice.detachedHead false
-          # Chiaki-ng: a clean pinned checkout, and a worktree with Veyra's two reviewed patches.
+          # Chiaki-ng: a clean pinned checkout, and a worktree with the reviewed patches (0003: four of
+          # chiaki-ng's own later commits for buttons that stayed pressed, checked to be exactly those).
           git clone -q https://github.com/streetpea/chiaki-ng.git chiaki-clean
           git -C chiaki-clean checkout -q $env:CHIAKI_COMMIT
           git -C chiaki-clean submodule update -q --init --recursive
           git -C chiaki-clean worktree add -q --detach "$env:DEPS\chiaki-stage" $env:CHIAKI_COMMIT
           git -C chiaki-stage submodule update -q --init --recursive
-          foreach ($p in '0001-chiaki-msvc-vla-compat.patch', '0002-chiaki-video-metadata.patch') {
+          foreach ($p in '0001-chiaki-msvc-vla-compat.patch', '0002-chiaki-video-metadata.patch', '0003-chiaki-feedback-history.patch') {
             git -C chiaki-stage apply "$env:GITHUB_WORKSPACE\scripts\remoteplay\patches\$p"
             if ($LASTEXITCODE -ne 0) { Write-Host "::error::$p does not apply"; exit 1 }
           }
@@ -323,7 +324,7 @@ jobs:
             Write-Host "$t exit $code"
             if ($code -ne 0) { $failed++ }
           }
-          foreach ($t in 'veyra_sound_profile_tests', 'veyra_push_audio_mix_tests', 'veyra_push_studio_sources_tests', 'veyra_push_benchmark_tests', 'veyra_push_hud_tests', 'veyra_push_adaptive_fg_tests', 'veyra_push_pacing_repair_tests', 'veyra_push_archive_paths_tests', 'veyra_push_crash_note_tests', 'veyra_frame_input_tests', 'veyra_push_quality_tests', 'veyra_push_input_latency_tests', 'veyra_vrr_profile_tests') {
+          foreach ($t in 'veyra_sound_profile_tests', 'veyra_push_audio_mix_tests', 'veyra_push_studio_sources_tests', 'veyra_push_benchmark_tests', 'veyra_push_hud_tests', 'veyra_push_adaptive_fg_tests', 'veyra_push_pacing_repair_tests', 'veyra_push_archive_paths_tests', 'veyra_push_crash_note_tests', 'veyra_push_compare_plan_tests', 'veyra_push_fg_health_tests', 'veyra_push_perf_report_tests', 'veyra_push_half_approval_tests', 'veyra_push_view_crop_tests', 'veyra_push_flow_motion_tests', 'veyra_push_flow2_tests', 'veyra_push_flow_guard_tests', 'veyra_push_flow_predict_tests', 'veyra_remoteplay_feedback_wire_tests', 'veyra_frame_input_tests', 'veyra_push_quality_tests', 'veyra_push_input_latency_tests', 'veyra_vrr_profile_tests') {
             cmake --build $env:BUILD --target $t --parallel
             if ($LASTEXITCODE -ne 0) { Write-Host "::error::$t did not build"; $failed++; continue }
             $exe = Get-ChildItem $env:BUILD -Recurse -Filter "$t.exe" | Select-Object -First 1
@@ -417,6 +418,37 @@ jobs:
             Write-Host "::error::PushFlow did not generate frames through the enhancement graph"; exit 1
           }
 
+      # PushFlow 2's Predict through the whole engine, with a live source (a Frame Input channel the test feeds
+      # itself): the engine's pair timing, admission and presentation order with Predict on, which the graph
+      # test cannot reach. The program finds PushFlow under <its folder>\runtime\experimental, so that folder
+      # is linked in for this step only and taken away again. Software renderer: it says the engine keeps
+      # playing and shows real frames sooner, nothing about a real graphics card.
+      - name: PushFlow 2 Predict through the engine, with a live source
+        run: |
+          cmake --build $env:BUILD --target veyra_push_predict_engine_tests --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $exe = Get-ChildItem $env:BUILD -Recurse -Filter 'veyra_push_predict_engine_tests.exe' | Select-Object -First 1
+          if (-not $exe) { Write-Host "::error::veyra_push_predict_engine_tests.exe not built"; exit 1 }
+          $root = $exe.DirectoryName
+          $madeRuntime = -not (Test-Path "$root\runtime")
+          $madeData = -not (Test-Path "$root\runtime_local")
+          if ($madeData) { New-Item -ItemType Directory -Force -Path "$root\runtime_local" | Out-Null }
+          if ($madeRuntime) {
+            New-Item -ItemType Directory -Force -Path "$root\runtime" | Out-Null
+            New-Item -ItemType Junction -Path "$root\runtime\experimental" -Target "$env:DEPS\pushflow\runtime" | Out-Null
+          }
+          $env:PATH = "$env:DEPS\vcpkg\installed\x64-windows\bin;$env:QT_ROOT_DIR\bin;$env:PATH"
+          & $exe.FullName "$env:RUNNER_TEMP\pushflow-predict-engine" 2>&1 | Out-Host
+          $code = $LASTEXITCODE
+          Write-Host "veyra_push_predict_engine_tests exit $code"
+          # The link is taken away, not what it points to.
+          if ($madeRuntime) { (Get-Item "$root\runtime\experimental").Delete(); Remove-Item "$root\runtime" -Force }
+          if ($madeData) { Remove-Item "$root\runtime_local" -Recurse -Force -ErrorAction SilentlyContinue }
+          if ($code -ne 0) {
+            Get-Content "$env:RUNNER_TEMP\pushflow-predict-engine\engine.log" -Tail 80 -ErrorAction SilentlyContinue | Out-Host
+            Write-Host "::error::Predict did not play a live source through the engine as expected"; exit 1
+          }
+
       # Going live: two outputs at once (RTMP + RTMPS through Schannel) to a local MediaMTX, read back,
       # server restart, a closed port, key redaction. Proves the FFmpeg build has rtmp/rtmps.
       - name: Going-live tests (local RTMP/RTMPS server)
@@ -443,6 +475,20 @@ jobs:
           Write-Host "veyra_mp4_finalize_tests exit $code"
           if ($code -ne 0) { exit 1 }
 
+      # Capture cards without the hardware: media types, strides and colour of what a card delivers, the
+      # Blackmagic and Elgato controls (HDR detection, the 4K X included) against stand-in devices.
+      - name: Capture card format and colour tests
+        run: |
+          cmake --build $env:BUILD --target veyra_capture_color_tests --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $exe = Get-ChildItem $env:BUILD -Recurse -Filter 'veyra_capture_color_tests.exe' | Select-Object -First 1
+          if (-not $exe) { Write-Host "::error::veyra_capture_color_tests.exe not built"; exit 1 }
+          $env:PATH = "$env:DEPS\vcpkg\installed\x64-windows\bin;$env:QT_ROOT_DIR\bin;$env:PATH"
+          & $exe.FullName 2>&1 | Out-Host
+          $code = $LASTEXITCODE
+          Write-Host "veyra_capture_color_tests exit $code"
+          if ($code -ne 0) { exit 1 }
+
       - name: QML component tests (PushFPS quick setup)
         run: |
           cmake --build $env:BUILD --target veyra_qml_quick_tests veyra_qml_easing_tests --parallel
@@ -463,7 +509,7 @@ jobs:
           $env:QML_DISABLE_DISK_CACHE = '1'
           Push-Location $stage
           $failed = 0
-          foreach ($t in 'tst_push_quick_setup', 'tst_push_picture_sound', 'tst_push_nis', 'tst_push_optimize', 'tst_push_presets', 'tst_push_appearance', 'tst_push_hud', 'tst_push_plug_and_play', 'tst_push_intro', 'tst_push_stream', 'tst_push_ps5_pairing', 'tst_push_compare', 'tst_push_studio', 'tst_push_watch', 'tst_push_layout', 'tst_push_frame_input', 'tst_push_tools') {
+          foreach ($t in 'tst_push_quick_setup', 'tst_push_picture_sound', 'tst_push_nis', 'tst_push_optimize', 'tst_push_presets', 'tst_push_appearance', 'tst_push_hud', 'tst_push_plug_and_play', 'tst_push_intro', 'tst_push_stream', 'tst_push_ps5_pairing', 'tst_push_compare', 'tst_push_studio', 'tst_push_watch', 'tst_push_layout', 'tst_push_crop', 'tst_push_frame_input', 'tst_push_tools', 'tst_push_flow2') {
             & .\veyra_qml_quick_tests.exe -platform offscreen -input "qml-tests\$t.qml" -o "$t.txt,txt" 2>&1 | Out-Host
             $code = $LASTEXITCODE
             Get-Content "$t.txt" -ErrorAction SilentlyContinue | Out-Host

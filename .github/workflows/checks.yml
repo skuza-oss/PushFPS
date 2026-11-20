@@ -3,6 +3,8 @@
 #  2. QML syntax: Qt 6.8.3 (the version PushFPS ships with) parses every QML file. A file that does not
 #     parse would stop the app at startup, so this catches it before anyone runs a build.
 #  3. QML lint (informational): qmllint findings for the PushFPS-specific QML files.
+#  4. Protected features (tests/protected-features.json): every test that guards a feature still exists
+#     and is still run by a workflow.
 name: checks
 
 on:
@@ -35,6 +37,9 @@ jobs:
             exit 1
           fi
 
+      - name: Protected features still have their guards
+        run: python3 -B scripts/checks/protected_features.py
+
       - name: PowerShell scripts parse
         shell: pwsh
         run: |
@@ -59,7 +64,7 @@ jobs:
       - name: QML syntax (qmlformat parses every file)
         run: |
           status=0
-          for f in qml/Veyra/*.qml tests/qml/quick/tst_push_quick_setup.qml tests/qml/quick/tst_push_picture_sound.qml tests/qml/quick/tst_push_nis.qml tests/qml/quick/tst_push_optimize.qml tests/qml/quick/tst_push_presets.qml tests/qml/quick/tst_push_appearance.qml tests/qml/quick/tst_push_hud.qml tests/qml/quick/tst_push_stream.qml tests/qml/quick/tst_push_ps5_pairing.qml tests/qml/quick/tst_push_compare.qml tests/qml/quick/tst_push_studio.qml tests/qml/quick/tst_push_watch.qml tests/qml/quick/tst_push_layout.qml tests/qml/quick/tst_push_frame_input.qml; do
+          for f in qml/Veyra/*.qml tests/qml/quick/tst_push_*.qml; do
             if ! qmlformat "$f" > /dev/null 2> /tmp/qmlformat.err; then
               echo "::error file=$f::QML does not parse"
               cat /tmp/qmlformat.err

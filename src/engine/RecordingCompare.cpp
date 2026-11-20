@@ -12,7 +12,7 @@ namespace {
 constexpr uint32_t kPitchAlign = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;          // 256
 constexpr uint64_t kPlacementAlign = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;  // 512
 constexpr UINT kRawSlots = 8;   // one raw-frame descriptor per recorder frame slot (LiveRecorder kSlots = 6)
-constexpr UINT kMaxOverlays = 2;
+constexpr UINT kMaxOverlays = 3;   // two badges and, in the Reveal layout, the sweeping line
 uint32_t alignPitch(uint32_t bytes) { return (bytes + kPitchAlign - 1) / kPitchAlign * kPitchAlign; }
 uint64_t alignOffset(uint64_t at) { return (at + kPlacementAlign - 1) / kPlacementAlign * kPlacementAlign; }
 uint8_t limited(uint8_t full) { return uint8_t(16 + (uint32_t(full) * 219 + 127) / 255); }
@@ -129,8 +129,10 @@ bool RecordingCompare::create(ID3D12Device* device, uint32_t width, uint32_t hei
     holdValid_ = rawHold_ = false; generated_ = real_ = rawFrames_ = 0;
     patches_.clear(); overlays_.clear(); upload_.Reset(); sideBySide_.reset(); vertical_.reset(); raw_.reset(); blend_.reset();
     outY_.Reset(); outUv_.Reset(); crop_ = {};
+    revealPush_ = revealConsole_ = revealLine_ = -1; lineW_ = 0; revealX_ = 0; revealLineShown_ = false;
     const bool sbs = layout == CompareLayout::SideBySide;
     const bool vert = layout == CompareLayout::Vertical;
+    const bool reveal = layout == CompareLayout::Reveal;
     compareOutputSize(layout, width, height, outW_, outH_);
     pictureW_ = sbs ? split_ : vert ? outW_ : 0;
     pictureH_ = sbs ? (height / 2) & ~1u : vert ? (outH_ / 2) & ~1u : 0;
@@ -223,7 +225,7 @@ bool RecordingCompare::create(ID3D12Device* device, uint32_t width, uint32_t hei
         return &scaled;
     };
     const RecordingLabel* labels[2] = {fit(left, fitted[0]), fit(right, fitted[1])};
-    struct Place { uint32_t x, y, w, h; const RecordingLabel* label; };
+    struct Place { uint32_t x, y, w, h; const RecordingLabel* label; int role; };   // role: 0 the console's label, 1 PushFPS's, 2 the Reveal line
     std::vector<Place> places;
     for (int side = 0; side < 2; ++side) {
         const auto* l = labels[side];
@@ -238,18 +240,27 @@ bool RecordingCompare::create(ID3D12Device* device, uint32_t width, uint32_t hei
             x = (x0 + (pictureW_ - w) / 2) & ~1u;
             y = inBar ? ((top_ - h) / 2) & ~1u : (top_ + margin) & ~1u;
         } else {
-            x = side ? (W - margin - w) & ~1u : margin;
+            // Split: the console (side 0) on the left. Reveal: PushFPS is left of the line, so the
+            // badges change corners.
+            x = (side != 0) != reveal ? (W - margin - w) & ~1u : margin;
             y = margin;
         }
-        places.push_back({x, y, w, h, l});
+        places.push_back({x, y, w, h, l, side});
     }
+    // Reveal: the line, a strip as high as the picture. Its place changes with every frame.
+    const RecordingLabel line = reveal ? compareRevealLine(height) : RecordingLabel{};
 
     // Colour labels: blended in by a compute pass. If it cannot load they are copied as grey levels.
     std::vector<RecordingLabel> greyed;
     greyed.reserve(2);
     std::vector<Place> blended;
+    std::vector<int> roles;   // per blended overlay: 0 the console's badge, 1 PushFPS's, 2 the line
     for (auto& p : places)
-        if (hasRgba(*p.label)) blended.push_back(p);
+        if (hasRgba(*p.label)) { blended.push_back(p); roles.push_back(p.role); }
+    if (reveal && hasRgba(line) && line.height == (height & ~1u)) {
+        blended.push_back({0, 0, line.width, line.height, &line, 2});
+        roles.push_back(2);
+    }
     if (!blended.empty()) {
         auto b = std::make_unique<Blend>();
         b->device = device;
@@ -294,6 +305,12 @@ bool RecordingCompare::create(ID3D12Device* device, uint32_t width, uint32_t hei
             }
             overlays_ = std::move(overlays);
             blend_ = std::move(b);
+            if (reveal)
+                for (size_t i = 0; i < roles.size(); ++i) {
+                    if (roles[i] == 0) revealConsole_ = int(i);
+                    else if (roles[i] == 1) revealPush_ = int(i);
+                    else { revealLine_ = int(i); lineW_ = overlays_[i].width; }
+                }
         } else {
             for (auto& p : places)
                 if (hasRgba(*p.label)) { greyed.push_back(lumaOf(*p.label)); p.label = &greyed.back(); }
@@ -304,9 +321,11 @@ bool RecordingCompare::create(ID3D12Device* device, uint32_t width, uint32_t hei
     std::vector<Source> sources;
     if (vert) sources.push_back({0, pictureH_ - divider / 2, W & ~1u, divider, nullptr});
     else if (sbs) sources.push_back({split_ - divider / 2, top_, divider, pictureH_, nullptr});
-    else sources.push_back({split_ - divider / 2, 0, divider, height & ~1u, nullptr});
+    else if (!reveal) sources.push_back({split_ - divider / 2, 0, divider, height & ~1u, nullptr});
+    // Reveal has no fixed divider, and a label that could not be blended is left out: a copied one
+    // could not be cut at the moving line.
     for (const auto& p : places)
-        if (!(blend_ && hasRgba(*p.label))) sources.push_back({p.x, p.y, p.w, p.h, p.label});
+        if (!reveal && !(blend_ && hasRgba(*p.label))) sources.push_back({p.x, p.y, p.w, p.h, p.label});
 
     // SDR: limited-range 8-bit (white 235, black 16, neutral chroma 128).
     // HDR: P010 (10-bit code in the top bits), PQ: white 573 = 203 nits, black 64, chroma 512.
@@ -372,7 +391,8 @@ void RecordingCompare::rawPass(ID3D12GraphicsCommandList* list, pipeline::StateT
     states.transition(list, raw.texture, D3D12_RESOURCE_STATE_COMMON);
 }
 
-void RecordingCompare::blend(ID3D12GraphicsCommandList* list, pipeline::StateTracker& states, ID3D12Resource* y, ID3D12Resource* uv) {
+void RecordingCompare::blend(ID3D12GraphicsCommandList* list, pipeline::StateTracker& states, ID3D12Resource* y, ID3D12Resource* uv,
+                             const Draw* draws, size_t count) {
     auto& b = *blend_;
     if (!b.uploaded) {
         for (size_t i = 0; i < overlays_.size(); ++i) {
@@ -393,8 +413,10 @@ void RecordingCompare::blend(ID3D12GraphicsCommandList* list, pipeline::StateTra
         pipeline::makeUav(b.device, uv, hdr_ ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM, pipeline::cpuHandleOf(b.pass, kMaxOverlays * 3 + 1));
         b.boundY = y; b.boundUv = uv;
     }
-    for (size_t i = 0; i < overlays_.size(); ++i) {
-        const auto& o = overlays_[i];
+    for (size_t n = 0; n < count; ++n) {
+        const Draw& o = draws[n];
+        const size_t i = o.index;
+        if (i >= overlays_.size() || o.width < 2 || o.height < 2) continue;
         // The picture under the label, read by the blend (a UAV is never read here).
         states.transition(list, y, D3D12_RESOURCE_STATE_COPY_SOURCE);
         states.transition(list, uv, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -412,7 +434,7 @@ void RecordingCompare::blend(ID3D12GraphicsCommandList* list, pipeline::StateTra
         states.transition(list, b.bgUv[i].Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         states.transition(list, y, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         states.transition(list, uv, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        const uint32_t constants[8] = {o.x, o.y, o.width, o.height, hdr_ ? 1u : 0u, 0, 0, 0};
+        const uint32_t constants[8] = {o.x, o.y, o.width, o.height, hdr_ ? 1u : 0u, 0, o.sourceX, 0};
         bindConstants(b.pass, list, constants, UINT(i * 3), kMaxOverlays * 3);
         list->Dispatch((o.width + 15) / 16, (o.height + 15) / 16, 1);
         states.uavBarrier(list, y);
@@ -421,7 +443,7 @@ void RecordingCompare::blend(ID3D12GraphicsCommandList* list, pipeline::StateTra
 }
 
 void RecordingCompare::compose(ID3D12GraphicsCommandList* list, pipeline::StateTracker& states, ID3D12Resource* y, ID3D12Resource* uv, bool generated,
-                               const RecordingRawFrame* raw, unsigned slot) {
+                               const RecordingRawFrame* raw, unsigned slot, double seconds) {
     if (!list || !y || !uv || !holdY_) return;
     if (generated) ++generated_; else ++real_;
     const auto copy = [&](ID3D12Resource* to, ID3D12Resource* from) {
@@ -440,6 +462,7 @@ void RecordingCompare::compose(ID3D12GraphicsCommandList* list, pipeline::StateT
     // The planes the divider and labels go on: the vertical output, or the recorder's own.
     ID3D12Resource* const ty = vertical_ ? outY_.Get() : y;
     ID3D12Resource* const tuv = vertical_ ? outUv_.Get() : uv;
+    int32_t revealCentre = 0;
     if (vertical_) {
         auto& v = *vertical_;
         if (v.boundY != y || v.boundUv != uv) {
@@ -482,6 +505,29 @@ void RecordingCompare::compose(ID3D12GraphicsCommandList* list, pipeline::StateT
         list->Dispatch((width_ + 15) / 16, (height_ + 15) / 16, 1);
         states.uavBarrier(list, y);
         states.uavBarrier(list, uv);
+    } else if (layout_ == CompareLayout::Reveal) {
+        // Reveal: left of the line every presented frame, from the line on the console side. Where
+        // the line is follows from the frame's time in the clip alone, so it moves as evenly as the
+        // frames themselves arrive.
+        const uint32_t right = width_ & ~1u;
+        const int32_t centre = compareRevealCentre(compareRevealPosition(seconds, revealInterval_), right, lineW_);
+        revealCentre = centre;
+        revealX_ = uint32_t(std::clamp<int32_t>(centre, 0, int32_t(right)));
+        // A real frame without a raw picture is already the console picture, whole.
+        if (revealX_ < right && (generated || rawHold_)) {
+            states.transition(list, y, D3D12_RESOURCE_STATE_COPY_DEST);
+            states.transition(list, uv, D3D12_RESOURCE_STATE_COPY_DEST);
+            states.transition(list, holdY_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE);
+            states.transition(list, holdUv_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE);
+            D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+            from.Type = to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            from.pResource = holdY_.Get(); to.pResource = y;
+            const D3D12_BOX yBox{revealX_, 0, 0, right, height_ & ~1u, 1};
+            list->CopyTextureRegion(&to, revealX_, 0, 0, &from, &yBox);
+            from.pResource = holdUv_.Get(); to.pResource = uv;
+            const D3D12_BOX uvBox{revealX_ / 2, 0, 0, right / 2, height_ / 2, 1};
+            list->CopyTextureRegion(&to, revealX_ / 2, 0, 0, &from, &uvBox);
+        }
     } else if (split_ && (generated || rawHold_)) {
         // Split: the left half shows the console side. A real frame without a raw picture is
         // already the console picture, whole.
@@ -515,7 +561,36 @@ void RecordingCompare::compose(ID3D12GraphicsCommandList* list, pipeline::StateT
             list->CopyTextureRegion(&to, p.x / 2, p.y / 2, 0, &from, nullptr);
         }
     }
-    if (blend_ && !overlays_.empty()) blend(list, states, ty, tuv);
+    if (!blend_ || overlays_.empty()) return;
+    Draw draws[kMaxOverlays];
+    size_t count = 0;
+    if (layout_ != CompareLayout::Reveal) {
+        for (size_t i = 0; i < overlays_.size() && count < kMaxOverlays; ++i)
+            draws[count++] = {i, overlays_[i].x, overlays_[i].y, overlays_[i].width, overlays_[i].height, 0};
+    } else {
+        // Each badge belongs to its picture and is cut at the line with it; the line goes on top.
+        revealLineShown_ = false;
+        if (revealPush_ >= 0) {
+            const auto& o = overlays_[size_t(revealPush_)];
+            const uint32_t shown = revealX_ > o.x ? std::min(o.width, (revealX_ - o.x) & ~1u) : 0;
+            if (shown >= 2) draws[count++] = {size_t(revealPush_), o.x, o.y, shown, o.height, 0};
+        }
+        if (revealConsole_ >= 0) {
+            const auto& o = overlays_[size_t(revealConsole_)];
+            const uint32_t start = std::max(o.x, revealX_);
+            if (start + 2 <= o.x + o.width) draws[count++] = {size_t(revealConsole_), start, o.y, o.x + o.width - start, o.height, start - o.x};
+        }
+        if (revealLine_ >= 0 && lineW_) {
+            const auto& o = overlays_[size_t(revealLine_)];
+            const int32_t left = revealCentre - int32_t(lineW_ / 2), width = int32_t(width_ & ~1u);
+            const int32_t x0 = std::max(left, 0), x1 = std::min(left + int32_t(lineW_), width);
+            if (x1 - x0 >= 2) {
+                draws[count++] = {size_t(revealLine_), uint32_t(x0), 0, uint32_t(x1 - x0), o.height, uint32_t(x0 - left)};
+                revealLineShown_ = true;
+            }
+        }
+    }
+    if (count) blend(list, states, ty, tuv, draws, count);
 }
 
 } // namespace veyra::engine

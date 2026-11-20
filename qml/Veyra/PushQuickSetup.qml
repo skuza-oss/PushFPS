@@ -6,6 +6,7 @@ import "EffectSupport.js" as Support
 import "PushCaptureCards.js" as Cards
 import "PushGamePresets.js" as Presets
 import "PushCompareClip.js" as CompareClip
+import "PushCrop.js" as Crop
 
 // PushFPS quick setup: the choices most console players make, above the detailed
 // controls. Every control here only sets existing settings (frame generation on/off,
@@ -417,6 +418,9 @@ VGroup {
                  lowLatency: veyra.nvidiaLowLatencyAvailable === true && (veyra.nvidiaLowLatency ?? 0) > 0 }
         // The enhancement's look, when there is an enhancement layer to read it from.
         if (quick.lookLayer !== null) s.look = { tone: quick.lookTone, structure: quick.lookStructure, fine: quick.fineSnapshot() }
+        // Crop and resize (PushCrop.js): the values while it is on, false while it is off.
+        const c = quick.cropState
+        s.crop = c.on && !Crop.neutral(c) ? { l: c.l, t: c.t, r: c.r, b: c.b, zoom: c.zoom, x: c.x, y: c.y } : false
         return s
     }
     function writeProfiles(p) {
@@ -450,6 +454,25 @@ VGroup {
         if (s.look && typeof s.look === "object") quick.applyFine(s.look.fine)
         if (veyra.nvidiaLowLatencyAvailable === true && typeof s.lowLatency === "boolean")
             veyra.nvidiaLowLatency = s.lowLatency ? 1 : 0
+        // Crop and resize: a profile saved with one sets it, one saved without switches it off (the
+        // values stay), and a profile from before 3.2.6, which knows nothing of it, leaves it alone.
+        if (s.crop === false) { if (quick.cropState.on) veyra.setPreference("pushCropOn", false) }
+        else if (s.crop && typeof s.crop === "object") quick.setCrop(Crop.copy(Crop.read({}), s.crop))
+    }
+    // Crop and resize of the console picture (PushCropDialog.qml; preferences and maths in PushCrop.js).
+    readonly property var cropState: Crop.read(veyra.preferences)
+    function setCrop(c) {
+        const wanted = Crop.values(c), saved = Crop.values(quick.cropState)
+        for (const k of Crop.keys) if (wanted[k] !== saved[k]) veyra.setPreference(k, wanted[k])
+        const on = !Crop.neutral(c)
+        if (quick.cropState.on !== on) veyra.setPreference("pushCropOn", on)
+    }
+    readonly property string cropHint: {
+        const c = quick.cropState
+        if (Crop.neutral(c)) return qsTr("显示完整画面")
+        if (!c.on) return qsTr("已关闭，设置保留")
+        if (veyra.presentationOwned === true) return qsTr("XeSS 补帧自己呈现画面，裁剪和缩放对它不生效")
+        return qsTr("左 %1% · 上 %2% · 右 %3% · 下 %4% · 大小 %5%").arg(c.l / 10).arg(c.t / 10).arg(c.r / 10).arg(c.b / 10).arg(c.zoom)
     }
     function switchConsole(id) {
         if (id === quick.consoleId) return
@@ -638,15 +661,15 @@ VGroup {
             readonly property int clipSeconds: CompareClip.seconds(veyra.preferences)
             readonly property bool clipUntilStop: CompareClip.untilStop(veyra.preferences)
             readonly property string clipLayout: {
-                const n = Number(veyra.preferences.pushCompareLayout || 0)
-                return n === 2 ? qsTr("竖屏") : n === 1 ? qsTr("并排") : qsTr("分屏")
+                const n = CompareClip.layout(veyra.preferences)
+                return n === 3 ? qsTr("滑动揭示") : n === 2 ? qsTr("竖屏") : n === 1 ? qsTr("并排") : qsTr("分屏")
             }
             text: quick.compareRecording ? qsTr("停止对比片段") : qsTr("对比片段")
             // While it records: how long it has run (a clip without a length has no other clock).
             sub: quick.compareRecording ? qsTr("正在录制…") + " " + CompareClip.elapsed((veyra.recordingState || {}).seconds)
                  : veyra.recording ? qsTr("录制中不可用")
                  : (clipUntilStop ? qsTr("手动停止") : qsTr("%1 秒").arg(clipSeconds)) + " · " + clipLayout
-            tip: qsTr("录制前后对比视频：一边是主机原本的帧率，一边是 PushFPS。可选分屏、并排或竖屏（TikTok、Shorts、Reels），以及时长")
+            tip: qsTr("录制前后对比视频：一边是主机原本的帧率，一边是 PushFPS。可选分屏、并排、竖屏（TikTok、Shorts、Reels）或滑动揭示，以及时长和画质")
             // Opens with nothing playing too, so the layout and length can be set beforehand;
             // the dialog says a picture is needed and only its start button records.
             enabled: quick.compareRecording || !veyra.recording
@@ -679,6 +702,7 @@ VGroup {
         label: qsTr("采集卡")
         hint: card && card.status === "tested" ? qsTr("PushFPS 已实测")
             : card && card.status === "veyra" ? qsTr("Veyra 作者已实测")
+            : card && card.status === "reported" ? qsTr("有 PushFPS 用户报告可用")
             : qsTr("还没有人报告这张卡的结果，欢迎在 GitHub 上分享")
         hintBelow: true
         RowLayout {
@@ -785,6 +809,42 @@ VGroup {
     readonly property bool cadenceMismatch: quick.liveStats.running === true && veyra.fgEnabled === true && quick.baseFps === 30
         && Math.abs(Number(quick.liveStats.captureFps || 0) - 60) < 3 && Number(quick.liveStats.contentFps || 0) > 45
         && Number(veyra.contentRate) !== 5
+    // Frame generation health (engine/PushFgHealth.h): frame generation is on and nothing generated
+    // is shown, so the picture plays at the game's own frame rate. Shown with its cause for as long
+    // as it lasts: 2 the method is not running, 3 the card does not keep up, 4 nothing comes out.
+    // (1, a target equal to the game's rate, is a setting and not shown here.)
+    // Polled on its own, for every method, whenever frame generation is on (the timer above runs
+    // only for the features that need the other numbers).
+    property int fgIdle: 0
+    property string fgIdleText: ""
+    function readFgHealth() {
+        const st = veyra.pushLiveStats() || ({})
+        quick.fgIdle = st.running === true && veyra.fgEnabled === true ? Number(st.fgIdle || 0) : 0
+        quick.fgIdleText = quick.fgIdle >= 2 ? String(st.fgIdleText || "") : ""
+    }
+    Timer {
+        objectName: "pushfps-fg-idle-timer"
+        interval: 1000; repeat: true
+        running: veyra.hasSource && veyra.fgEnabled && quick.visible
+        triggeredOnStart: true
+        onTriggered: quick.readFgHealth()
+        onRunningChanged: if (!running) { quick.fgIdle = 0; quick.fgIdleText = "" }
+    }
+    VRow {
+        objectName: "pushfps-fg-idle-row"
+        visible: quick.fgIdle >= 2
+        label: qsTr("补帧没有出画面")
+        hint: quick.fgIdleText
+        hintColor: Theme.warn
+        hintBelow: true
+        // What the session really does, to send along (bridge/PushTools.cpp).
+        VButton {
+            objectName: "pushfps-fg-idle-report"
+            text: qsTr("复制性能报告")
+            ghost: true
+            onClicked: { veyra.pushCopyPerformanceReport(); veyra.logUi("push-quick", "performance report copied from the frame generation health row") }
+        }
+    }
     VRow {
         objectName: "pushfps-cadence-row"
         visible: quick.cadenceMismatch
@@ -910,8 +970,13 @@ VGroup {
         objectName: "pushfps-enhance-row"
         label: qsTr("AI 画面增强")
         help: qsTr("用 AI 去掉采集卡压缩造成的色块和噪点，让细节更清楚。和补帧无关，可以单独开关")
+        // Not possible: the reason, and when the card could run it but its files were left out at
+        // installation (they are the installer's optional extras), how to get them.
+        readonly property var support: Support.status(veyra, "nr")
         hint: quick.nrPossible ? qsTr("关闭时只做补帧。开启后每帧都经过 NVIDIA 神经渲染（DLSS 5 NR）增强，画面更清晰，但更耗 GPU")
-                               : (Support.status(veyra, "nr").reason || "")
+                               : (support.reason || "") + (support.missingFiles === true
+                                   ? " " + qsTr("它属于安装时可选的实验性附加组件：重新运行 Install-PushFPS.cmd，询问时回答 y 即可，设置会保留") : "")
+        hintBelow: !quick.nrPossible && support.missingFiles === true
         VSwitch {
             objectName: "pushfps-enhance"
             enabled: quick.nrPossible
@@ -1154,6 +1219,33 @@ VGroup {
             options: quick.fillOptions
             current: quick.fillId
             onPicked: id => quick.setFill(id)
+        }
+    }
+
+    // Crop and resize of the console picture: the button opens the editor on the live picture, the
+    // switch shows the whole picture again without losing the values.
+    VRow {
+        objectName: "pushfps-crop-row"
+        visible: !(quick.compact && quick.compactPro)
+        label: qsTr("裁剪和缩放")
+        help: qsTr("裁掉画面的任意一边，例如游戏自带的黑边或采集卡多出来的边框，并调整画面在屏幕上的大小和位置。只改变屏幕上的显示；录制和直播默认保留完整画面，可以在里面改")
+        hint: quick.cropHint
+        hintBelow: true
+        RowLayout {
+            spacing: 8
+            VButton {
+                objectName: "pushfps-crop-edit"
+                ghost: true
+                text: qsTr("调整…")
+                onClicked: quick.openOnPicture("crop")
+            }
+            VSwitch {
+                objectName: "pushfps-crop"
+                enabled: !Crop.neutral(quick.cropState)
+                opacity: enabled ? 1 : 0.4
+                checked: quick.cropState.on
+                onToggled: checked => veyra.setPreference("pushCropOn", checked)
+            }
         }
     }
 

@@ -11,7 +11,11 @@
 //     interpolation should beat),
 //   - PSNR of real frames through the same pipeline (the ceiling: enhancement and colour handling
 //     change real frames too),
-//   - the share of generated frames shown on time (within half a frame interval of their spacing).
+//   - the share of generated frames shown on time (within half a frame interval of their spacing),
+//   - the worst frame of the test, and the worst place: the picture cut into kTilesX x kTilesY tiles and
+//     the weakest tile of each frame (since 3.2.7). An average hides both: PushFlow leaves an object
+//     that moves too fast out of the generated frame (docs/PUSHFLOW2.md), which costs the whole-picture
+//     PSNR a fraction of a dB and the tile the object should be in nearly everything.
 // Source pictures (YUV / RGB from the capture) and presented pictures (RGB from the graph) are
 // compared as luma on a kGridW x kGridH grid; a straight-line fit from real frames maps the source's
 // luma onto the presented one, so range and tone differences between the two don't count as errors.
@@ -49,6 +53,9 @@ bool lumaFromOutput(const uint8_t* data, size_t pitch, uint32_t width, uint32_t 
 struct Box { float left = 0, top = 0, right = 0, bottom = 0; };
 
 double psnr(const Luma& a, const Luma& b, const std::vector<Box>* inside = nullptr);
+// The weakest place: the lowest PSNR among the kTilesX x kTilesY tiles of the grid.
+constexpr uint32_t kTilesX = 16, kTilesY = 9;
+double worstTilePsnr(const Luma& a, const Luma& b);
 double meanAbsError(const Luma& a, const Luma& b);
 double badPixelShare(const Luma& a, const Luma& b, float threshold = kBadPixel);
 Luma blend(const Luma& a, const Luma& b);
@@ -62,6 +69,7 @@ Luma apply(const Fit& fit, const Luma& source);
 struct Sample {
     double psnr = 0, blendPsnr = 0, hudPsnr = 0, meanError = 0, badShare = 0;
     bool hud = false;
+    double worstTile = 0;        // worstTilePsnr of this frame
 };
 Sample measure(const Luma& generated, const Luma& original, const Luma& previous, const Luma& next, const Fit& fit,
                const std::vector<Box>& hudBoxes);
@@ -70,6 +78,9 @@ struct Report {
     uint32_t samples = 0, realSamples = 0, hudSamples = 0;
     double psnr = 0, blendPsnr = 0, realPsnr = 0, hudPsnr = 0, meanError = 0, badShare = 0;
     uint64_t generatedShown = 0, generatedOnTime = 0;
+    // The least accurate generated frame of the test, and the weakest place of a frame (each frame's
+    // worst tile, averaged over the frames as the other values are). Shown, never part of the score.
+    double worstFramePsnr = 0, worstPlacePsnr = 0;
     double onTimeShare() const { return generatedShown ? double(generatedOnTime) / double(generatedShown) : 0; }
     double gainOverBlend() const { return psnr - blendPsnr; }
     // 0..100 for ranking frame generation methods: PSNR, its gain over blending, HUD PSNR and timing.

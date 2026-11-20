@@ -12,7 +12,9 @@ RWTexture2D<float> outY : register(u0);
 RWTexture2D<float2> outUv : register(u1);
 cbuffer Constants : register(b0) {
     uint x0, y0, w, h; // badge place in the picture (even) and size
-    uint hdr; float fade; uint pad1, pad2; // fade: 1 - opacity (scene transitions; 0 = opaque)
+    uint hdr; float fade; uint sx, pad2; // fade: 1 - opacity (scene transitions; 0 = opaque)
+    // sx: the first badge column drawn (0 for a whole badge). The Reveal comparison layout draws
+    // part of a badge, cut at its sweeping line, and the line itself as it slides in and out.
 };
 float3 coded(float3 srgb) {
     if (hdr) {
@@ -30,7 +32,7 @@ float codes(float v) { return hdr ? round(v * 65535.0 / 64.0) * 64.0 / 65535.0 :
 void main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= w || id.y >= h) return;
     const uint2 p = uint2(x0, y0) + id.xy;
-    const float4 o = overlay[id.xy];
+    const float4 o = overlay[id.xy + uint2(sx, 0)];
     float luma = bgY[id.xy];
     const float keep = saturate(1.0 - fade);
     if (o.a > 0) luma = lerp(luma, coded(saturate(o.rgb)).x, o.a * keep);
@@ -41,7 +43,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     float alpha = 0;
     [unroll] for (uint j = 0; j < 2; ++j)
         [unroll] for (uint i = 0; i < 2; ++i) {
-            const float4 t = overlay[min(id.xy + uint2(i, j), uint2(w - 1, h - 1))];
+            const float4 t = overlay[min(id.xy + uint2(i, j), uint2(w - 1, h - 1)) + uint2(sx, 0)];
             sum += t.rgb * t.a;
             alpha += t.a;
         }

@@ -185,6 +185,10 @@ Item {
         dialogHost: host
         sceneId: host.layoutScene
     }
+    PushCropDialog {
+        id: cropDialog
+        dialogHost: host
+    }
 
     // --- small building blocks the design's dialogs use --------------------
 

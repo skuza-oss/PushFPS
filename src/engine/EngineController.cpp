@@ -1,3 +1,4 @@
+#include "veyra/pushflow/PushFlowPredict.h"
 #include "veyra/engine/EngineController.h"
 #include "veyra/engine/PlaybackRate.h"
 #include "veyra/engine/PreviewFrameReadiness.h"
@@ -375,6 +376,10 @@ bool EngineController::requestSettings(EnhancementSettings s,std::optional<Chain
     if(!s.sameVideoConfiguration(desired_)||order!=desiredNodeOrder_)s.revision=++nextRevision_;
     desiredNodeOrder_=order;desired_=s;snapshot_.desired=s;snapshot_.applying=snapshot_.applied!=desired_;
     if(acceptedRevision)*acceptedRevision=s.revision;return true;
+}
+void EngineController::refreshGraph(){
+    std::lock_guard lock(mutex_);
+    desired_.revision=++nextRevision_;snapshot_.desired=desired_;snapshot_.applying=snapshot_.applied!=desired_;
 }
 void EngineController::saveFrame(const std::wstring& path){std::lock_guard lock(mutex_);savePath_=path;snapshot_.savedFramePath.clear();}
 bool EngineController::requestRecording(const RecordingSettings& options,std::wstring& error){return recorder_->start(options,error);}
@@ -785,6 +790,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 StageRequest r;r.nr=o.nr;r.sr=o.sr;r.fg=o.fg;r.fgMultiplier=o.fgMultiplier;
                 r.width=width;r.height=height;r.stillImage=isImage;r.nvidiaAdapter=nvidiaAdapter;r.amdNr=amdNrAdapter;
                 r.uncompressedSource=isScreen||(physicalCapture&&!captureSource.compressedVideo());
+                r.liveSource=isCapture;
                 r.nodeOrder=o.nodeOrder?&*o.nodeOrder:nullptr;return r;
             };
             describeStages(stageRequest(options),options.snapshot(),gd);
@@ -1385,7 +1391,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                     // so the evaluated group is recognised by its generated frames.
                     const bool phaseSample=phaseValidOnly?valid==batch.fgCandidates&&batch.hasGenerated:
                         batch.fgCandidates>0&&valid+invalid==batch.fgCandidates&&!failed;
-                    if(adaptiveCapturePhase&&watch.phaseAnchor>0&&phaseSample&&
+                    if(adaptiveCapturePhase&&watch.phaseAnchor>0&&phaseSample&&!batch.fgPredict&&
                        !batch.historyReset&&!batch.fgRecovery&&!costSettling&&!batch.fgFast&&
                        batch.batch.identity.settingsRevision==fgBudgetRevision&&watch.presentationGeneration==presentationGeneration.load()){
                         int64_t requiredDelay=0;
@@ -1816,7 +1822,9 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                        gd.flowWidth!=nextDesc.flowWidth||gd.flowHeight!=nextDesc.flowHeight||
                        gd.dualSr!=nextDesc.dualSr||gd.dualSrQuality!=nextDesc.dualSrQuality||gd.firstSrWidth!=nextDesc.firstSrWidth||gd.firstSrHeight!=nextDesc.firstSrHeight||
                        gd.srInputWidth!=nextDesc.srInputWidth||gd.srInputHeight!=nextDesc.srInputHeight||
-                       gd.srOutputWidth!=nextDesc.srOutputWidth||gd.srOutputHeight!=nextDesc.srOutputHeight)rebuild=true;
+                       gd.srOutputWidth!=nextDesc.srOutputWidth||gd.srOutputHeight!=nextDesc.srOutputHeight||
+                       // PushFPS: PushFlow's motion size (a preference, not a field of the settings) sizes its network.
+                       gd.pushFlowMotion!=nextDesc.pushFlowMotion||gd.pushFlowEncoderCache!=nextDesc.pushFlowEncoderCache||gd.pushFlowGuard!=nextDesc.pushFlowGuard||gd.pushFlowPredict!=nextDesc.pushFlowPredict)rebuild=true;
                     bool accepted=ring.drainQueue();out={};hasOutput=false;
                     resetRecord->rebuilt=rebuild;
                     markResetStage(diagnostics::ResetStage::Drain);
@@ -1966,7 +1974,9 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
 }
                     presenter.cancelReflexInput();
                     if(audioStarted)audioPipe.setPaused(true);wasPaused=true;
-                    const bool referencesValid=hasOutput&&out.batch.count&&out.batch.frames[out.batch.count-1].lease&&out.batch.frames[out.batch.count-1].lease->referencesValid;
+                    // The real frame is the batch's last, or with PushFlow 2's Predict its first.
+                    const auto* shownReal=hasOutput&&out.batch.count?&out.batch.frames[out.fgPredict?0:out.batch.count-1]:nullptr;
+                    const bool referencesValid=shownReal&&shownReal->lease&&shownReal->lease->referencesValid;
                     if(hasOutput&&!presenter.present(ctx,ring,*graph,out.videoSlot,false,referencesValid,comparisonMode_,comparisonBase_,comparisonSplit_,out.batch.identity,previewView(),-1,true)){if(recoverXessPresentation())continue;status(L"画面呈现失败",true);break;}
                     if(hasOutput&&graph->resolveGeneration(out))completeReset(out.batch.identity);
                     // Poll live view/size changes at 50 ms; unchanged flip
@@ -2548,7 +2558,12 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 // generated frames before this change), so their bound stays as it was;
                 // the FG allowance is for 60->30 and transport pairs.
                 const int64_t fgPhaseAllowance=marginPair&&!smoothContentAnchor?fgBudget.phaseAllowance(host100ns(),liveInterval):0;
-                const auto pairDelay=marginPair?
+                // PushFlow 2's Predict (opt-in): the real frame is shown first and the generated frames are
+                // forecasts after it, so the pair waits only for its own processing, never a frame interval.
+                // It steps aside while the quality test, a benchmark window or the optimiser measures in-between frames.
+                if(graph)graph->setPushFlowPredictPaused(quality_->running()||pushBenchmarkProbe().active()||pushflow2::predictPaused());
+                const bool predictPair=isCapture&&options.fg&&graph&&graph->pushFlowPredicting();
+                const auto pairDelay=predictPair?processingAllowance+pairExtra:marginPair?
                     pairLatency.select(host100ns(),legacyPairDelay,liveInterval,previewFgMultiplier,std::max(transportInterval/2,fgPhaseAllowance))+pairExtra:legacyPairDelay;
                 std::optional<int64_t> pairPresentAnchor;
                 const auto presentAnchorFor=[&](int64_t source){
@@ -2577,7 +2592,9 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         else if(!liveTimeline.anchored(batch.identity.epoch))liveTimeline.reset(batch.identity.epoch,batch.b100ns,liveInputReady,liveSourceInterval100ns(pkt.duration,activeSource->info().averageFps));
                         const auto interval=liveInterval;
                         const auto a=(historyReset||batch.b100ns<=batch.a100ns||batch.b100ns-batch.a100ns>10000000)?batch.b100ns-interval:batch.a100ns;
-                        const auto lastGenerated=pipeline::FrameBatch::interpolate(a,batch.b100ns,previewFgMultiplier-1,previewFgMultiplier);
+                        // With Predict the group must be done for its first forecast, which follows the real frame.
+                        const auto firstForecast=predictPair?pushflow::predict::pts(a,batch.b100ns,1,previewFgMultiplier):0;
+                        const auto lastGenerated=firstForecast>0?firstForecast:pipeline::FrameBatch::interpolate(a,batch.b100ns,previewFgMultiplier-1,previewFgMultiplier);
                         const auto now=host100ns(),deadline=liveTimeline.deadline(lastGenerated);
                         const double elapsed=elapsedMs(processStart);
                         const bool admitted=!vfgCostSettling.holding(now)&&fgBudget.admit(now,deadline,elapsed,presentP95,warmingHistory);
@@ -2852,6 +2869,8 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                         const auto presentAnchor=fgHeld?liveInputReady:smoothedAnchor;
                         liveGeneratedGrace=liveGeneratedGrace100ns(liveInputReady,presentAnchor);
                         liveTimeline.resetPair(out.batch.identity.epoch,out.batch.b100ns,presentAnchor,options.fg&&!fgHeld?pairDelay:0,paceSourcePts);
+                        // Predict: when this real frame is due, for the forecasts of the frame before it (above).
+                        if(predictPair||out.fgPredict){predictNewestReal100ns_=out.batch.b100ns;predictNewestDue100ns_=liveTimeline.deadline(out.batch.b100ns);}
                         if((smoothTransportAnchor||smoothContentAnchor)&&host100ns()>=nextLiveAnchorLog){
                             nextLiveAnchorLog=host100ns()+10000000;
                             veyra::log::info("live-anchor",std::format("revision={} contentClock={} callbackJitterMs={:.3f} clockDriftPpm={:.0f} snaps={} callbackMinusAnchorMs={:.3f} phaseMs={:.3f} deadlineExtraMs={:.3f} fgPhaseAllowanceMs={:.3f} fgHeld={} capacityWaitMs={:.2f} (presentation anchor: source or deduplicated content PTS on the tracked capture clock; fgHeld: real frame shown when ready, phase unused; capacity wait applies under explicit VSync)",options.settings.revision,smoothContentAnchor,liveArrival.jitterMs(),liveArrival.driftPpm(smoothContentAnchor?transportInterval:liveInterval),liveArrival.snaps(),double(liveInputReady-presentAnchor)/10000,double(pairDelay)/10000,double(pairExtra)/10000,double(fgPhaseAllowance)/10000,fgHeld,smoothTransportAnchor?liveSmoothedCapacityWaitMs(double(liveInterval)/10000/std::max(1u,previewFgMultiplier),fixedCapacityWait?0:liveArrival.jitterMs()):2.0));
@@ -2929,7 +2948,9 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                             if(stop_||(paused_&&!seekPreviewPending)||seekSeconds_>=0)return {State::Complete};
                             const double itemPtsMs=double(item.pts100ns)/10000;
                             const auto decisionTime=host100ns();
-                            const bool generationExpired=generated&&(isCapture?timeline.expired(item.pts100ns,decisionTime,generatedGrace):!fileAwaitingVideo&&previewGeneratedExpired(nowMs(),itemPtsMs));
+                            // A forecast is never shown once a newer real frame is due: that frame is the truth it stood in for.
+                            const bool superseded=generated&&batch.fgPredict&&predictNewestReal100ns_>batch.batch.b100ns&&predictNewestDue100ns_<=timeline.deadline(item.pts100ns);
+                            const bool generationExpired=generated&&(superseded||(isCapture?timeline.expired(item.pts100ns,decisionTime,generatedGrace):!fileAwaitingVideo&&previewGeneratedExpired(nowMs(),itemPtsMs)));
                             // XeSS shares the producer queue; native no-FG capture has an explicit GPU-side fence wait.
                             const bool early=submitThenPresent&&!generated&&!watch->ready;
                             if(!watch->frameReadyObserved[s.next]&&item.lease&&item.lease->ready())watch->frameReadyObserved[s.next]=host100ns();
@@ -2955,7 +2976,7 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                                 veyra::log::info("fg-deadline",std::format("revision={} batch={} subframe={} expired={} readyObservedLateMs={:.3f} decisionLateMs={:.3f} observedReadyToDecisionMs={:.3f} batchReady={} (CPU fence observations, not scanout; -1 means readiness unknown)",item.identity.settingsRevision,batch.batch.batchId,item.subframe,generationExpired,ready?double(ready-timeline.deadline(item.pts100ns))/10000:-1,double(decisionTime-timeline.deadline(item.pts100ns))/10000,ready?double(decisionTime-ready)/10000:-1,watch->ready.load()));
                                 veyra::log::info("fg-drops",std::format("revision={} deadline={} capacity={} cap={} graceMs={:.1f} (session totals of frames dropped before Present, by reason)",item.identity.settingsRevision,generatedDropDeadline,generatedDropCapacity,generatedDropCap,double(generatedGrace)/10000));
                             }
-                            if(readiness==PreviewFrameReadiness::Expired){++generatedDropDeadline;++s.dropped;++s.handled;++s.next;s.deadlineStart.reset();s.capacityStart.reset();continue;}
+                            if(readiness==PreviewFrameReadiness::Expired){++generatedDropDeadline;predictSuperseded_+=superseded;++s.dropped;++s.handled;++s.next;s.deadlineStart.reset();s.capacityStart.reset();continue;}
                             if(!s.deadlineStart)s.deadlineStart=Clock::now();
                             if(isCapture){if(host100ns()<timeline.deadline(item.pts100ns))return {State::Pending,timeline.deadline(item.pts100ns),timeline.paced()&&!presenter.providerOwnedPresentation()};}
                             else if(!fileAwaitingVideo){
@@ -3206,7 +3227,14 @@ void EngineController::run(HWND window,std::wstring path,PlayerOptions options,s
                 // Refresh and VRR state (DisplayStateService, queried on events
                 // only) are polled outside the snapshot lock; this never waits.
                 presenter.displayRefreshHz();
-                ++frames;{std::lock_guard lock(mutex_);snapshot_.metrics=measured;if((frames&31)==0){const auto pf=graph->pushFlowSummary();snapshot_.pushFlowPrecision=pf.precision;snapshot_.pushFlowRebuild=pf.rebuild;snapshot_.pushFlowP50Ms=pf.p50Ms;snapshot_.pushFlowP95Ms=pf.p95Ms;}snapshot_.colorStatus=graph->videoHdrActive()?L"SDR → RTX Video HDR":options.settings.videoHdr.enabled&&!gd.hdrInput?L"SDR → SDR（HDR显示未启用）":gd.hdrOutput?(graph->hdr10Output()?L"HDR → HDR10 / PQ":L"HDR → scRGB / 浮点"):gd.hdrInput?L"HDR → SDR色调映射":L"SDR → SDR";snapshot_.position=(isCapture||isImage?pts:lastFilePresentedMs)/1000;snapshot_.frames=sourceFrames;snapshot_.generated=graphStats.fgGeneratedFrames;snapshot_.lateMs=lateness;snapshot_.lateP95Ms=presentReturnDeviation.p95();
+                ++frames;{std::lock_guard lock(mutex_);snapshot_.metrics=measured;if((frames&31)==0){const auto pf=graph->pushFlowSummary();snapshot_.pushFlowPrecision=pf.precision;snapshot_.pushFlowRebuild=pf.rebuild;snapshot_.pushFlowP50Ms=pf.p50Ms;snapshot_.pushFlowP95Ms=pf.p95Ms;snapshot_.pushFlowMotionWidth=pf.motionWidth;snapshot_.pushFlowMotionHeight=pf.motionHeight;
+                    snapshot_.pushFlowEncoderCache=pf.encoderCache;snapshot_.pushFlowEncoderRuns=pf.encoderRuns;snapshot_.pushFlowFeaturesKept=pf.featuresKept;snapshot_.pushFlowFeaturesMade=pf.featuresMade;
+                    snapshot_.pushFlowWholeMs=pf.wholeMs;snapshot_.pushFlowSplitMs=pf.splitMs;snapshot_.pushFlowSplitCheckDb=pf.splitCheckDb;
+                    snapshot_.pushFlowGuard=pf.guard;snapshot_.pushFlowGuardFrames=pf.guardFrames;snapshot_.pushFlowGuardMended=pf.guardMended;snapshot_.pushFlowGuardHeld=pf.guardHeld;
+                    snapshot_.pushFlowPredict=pf.predict;snapshot_.pushFlowPredictFrames=pf.predictFrames;snapshot_.pushFlowPredictCounted=pf.predictCounted;
+                    snapshot_.pushFlowPredictMoving=pf.predictMoving;snapshot_.pushFlowPredictHeld=pf.predictHeld;snapshot_.pushFlowPredictSuperseded=predictSuperseded_;
+                    // Asked for, and the source is a file: Predict is for live sources only, and says so.
+                    if(snapshot_.pushFlowPredict.empty()&&!isCapture&&pushflow2::wanted(pushflow2::Experiment::Predict))snapshot_.pushFlowPredict="not-live";}snapshot_.colorStatus=graph->videoHdrActive()?L"SDR → RTX Video HDR":options.settings.videoHdr.enabled&&!gd.hdrInput?L"SDR → SDR（HDR显示未启用）":gd.hdrOutput?(graph->hdr10Output()?L"HDR → HDR10 / PQ":L"HDR → scRGB / 浮点"):gd.hdrInput?L"HDR → SDR色调映射":L"SDR → SDR";snapshot_.position=(isCapture||isImage?pts:lastFilePresentedMs)/1000;snapshot_.frames=sourceFrames;snapshot_.generated=graphStats.fgGeneratedFrames;snapshot_.lateMs=lateness;snapshot_.lateP95Ms=presentReturnDeviation.p95();
                     snapshot_.videoHdrActive=graph->videoHdrActive();
                     snapshot_.beautyActive=graph->beautyNodesActive();snapshot_.beautyFaces=graph->beautyFaceCount();
                     snapshot_.beautyNotice=graph->beautyNotice();

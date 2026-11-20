@@ -39,6 +39,7 @@
 #include "veyra/gfx/FsrSrBackend.h"
 #include "veyra/gfx/FsrFgPresenter.h"
 #include "veyra/gfx/AmfFrcBackend.h"
+#include "veyra/pushflow/PushFlowPredict.h"
 #include "veyra/pushflow/PushFlowBackend.h"
 #include "veyra/ngx/DlssNrParameters.h"
 #include "veyra/ngx/DlssNrRuntimeAdapter.h"
@@ -1597,11 +1598,17 @@ bool EnhanceGraph::initVfg()
 
 bool EnhanceGraph::amfFrcActive() const { return amfFrc_&&amfFrc_->ready(); }
 bool EnhanceGraph::pushFlowActive() const { return pushFlow_&&pushFlow_->status().ready; }
+bool EnhanceGraph::pushFlowPredicting() const { return pushFlow_ && desc_.pushFlowPredict && !pushFlowPredictPaused_ && pushFlow_->status().predict; }
 EnhanceGraph::PushFlowSummary EnhanceGraph::pushFlowSummary() const {
     PushFlowSummary s;
     if(!pushFlowActive())return s;
     const auto t=pushFlow_->telemetry();
     s.precision=pushFlow_->status().precision;s.rebuild=pushFlow_->status().rebuild;s.p50Ms=t.inferP50Ms;s.p95Ms=t.inferP95Ms;
+    s.motionWidth=pushFlow_->status().modelW;s.motionHeight=pushFlow_->status().modelH;
+    s.encoderCache=pushFlow_->status().splitState;s.encoderRuns=t.encoderRuns;s.featuresKept=t.featureHits;s.featuresMade=t.featureMisses;
+    s.wholeMs=pushFlow_->status().wholeMs;s.splitMs=pushFlow_->status().splitMs;s.splitCheckDb=pushFlow_->status().splitCheckDb;
+    s.guard=pushFlow_->status().guardState;s.guardFrames=t.guardFrames;s.guardMended=t.guardMended;s.guardHeld=t.guardHeld;
+    s.predict=pushFlow_->status().predictState;s.predictFrames=t.predictFrames;s.predictCounted=t.predictCounted;s.predictMoving=t.predictMoving;s.predictHeld=t.predictHeld;
     return s;
 }
 // PushFlow (pushflow/PushFlowBackend.h): RIFE on DirectML, any multiplier (the time of each frame).
@@ -1613,7 +1620,7 @@ bool EnhanceGraph::initPushFlow()
     const bool linear=format==DXGI_FORMAT_R16G16B16A16_FLOAT||format==DXGI_FORMAT_R16G16B16A16_TYPELESS;
     const auto encoding=linear?(desc_.hdrOutput?pushflow::Encoding::ScRgbHdr:pushflow::Encoding::LinearSdr):pushflow::Encoding::Encoded;
     pushFlow_=std::make_unique<pushflow::PushFlowBackend>();
-    if(!pushFlow_->initialize(context_.device(),ring_.queue(),desc_.runtimeAbsPath,workW_,workH_,format,encoding,desc_.vfgQuality)){pushFlow_.reset();return false;}
+    if(!pushFlow_->initialize(context_.device(),ring_.queue(),desc_.runtimeAbsPath,workW_,workH_,format,encoding,desc_.vfgQuality,desc_.pushFlowMotion,desc_.pushFlowEncoderCache,desc_.pushFlowGuard,desc_.pushFlowPredict)){pushFlow_.reset();return false;}
     fgCapsAvailable_=true;fgMultiFrameMax_=3;
     failedBackend_=engine::FailedBackend::None;
     return true;
@@ -4093,6 +4100,11 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     out.videoFenceValue = ring_.lastSignaledValue();
     out.videoFenceObject = context_.fence();
 
+    // PushFlow 2's Predict (opt-in, live sources): this pair's generated frames are forecasts for after
+    // the real frame (a reduced group has one, half an interval after it).
+    const bool predictBatch=pushFlowPredicting();
+    std::array<BatchFrame,FrameBatch::Capacity> afterReal{};
+    uint32_t afterRealCount=0;
     // FG reads enhanced SDR color, not the pre-NR guidance input.
     if (runFg && fgCreated()) {
       for(uint32_t sub=1;sub<=fgCalls;++sub){
@@ -4107,12 +4119,54 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
                 gpuTimer_.submitted(ring_.lastSignaledValue());
                 continue;
             }
+            if(predictBatch){
+                // PushFlow 2's Predict: the network runs once for the pair, for the half-way time; every
+                // forecast is then made from its grids, for a time AFTER this real frame.
+                if(sub==1){
+                    auto* plist=ring_.acquireNext(slot,st);if(!plist)return false;
+                    gpuTimer_.mark(plist,GpuStage::FgBatch);gpuTimer_.mark(plist,GpuStage::Fg1);
+                    tracker_.transition(plist,videoFrame_[1-parity].Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                    tracker_.transition(plist,videoFrame_[parity].Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                    if(!pushFlow_->pack(plist,videoFrame_[1-parity].Get(),videoFrame_[parity].Get(),0.5f,false,realFrameIndex_,realFrameIndex_+1)){failedBackend_=engine::FailedBackend::Fg;return false;}
+                    tracker_.transition(plist,videoFrame_[1-parity].Get(),D3D12_RESOURCE_STATE_COMMON);
+                    tracker_.transition(plist,videoFrame_[parity].Get(),D3D12_RESOURCE_STATE_COMMON);
+                    if(!submitGraph(slot))return false;
+                    if(!pushFlow_->infer()){failedBackend_=engine::FailedBackend::Fg;return false;}
+                }
+                auto* flist=ring_.acquireNext(slot,st);if(!flist)return false;
+                tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_COPY_DEST);
+                tracker_.transition(flist,videoFrame_[1-parity].Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                tracker_.transition(flist,videoFrame_[parity].Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                if(!pushFlow_->forecast(flist,videoFrame_[1-parity].Get(),videoFrame_[parity].Get(),genFrame_[generatedSlot].Get(),pushflow::predict::ahead(sub,outputMultiplier))){failedBackend_=engine::FailedBackend::Fg;return false;}
+                tracker_.transition(flist,videoFrame_[1-parity].Get(),D3D12_RESOURCE_STATE_COMMON);
+                tracker_.transition(flist,videoFrame_[parity].Get(),D3D12_RESOURCE_STATE_COMMON);
+                // A forecast follows this real frame, so its HUD and excluded regions are this frame's.
+                composeHudLock(flist,generatedSlot,parity);
+                if(!composeExclusion(flist,generatedSlot+2,parity,false))return false;
+                tracker_.transition(flist,genFrame_[generatedSlot].Get(),D3D12_RESOURCE_STATE_COMMON);
+                if(sub==fgCalls){gpuTimer_.mark(flist,GpuStage::Fg1,true);gpuTimer_.mark(flist,GpuStage::FgBatch,true);gpuTimer_.resolve(flist);}
+                if(!submitGraph(slot))return false;
+                if(sub==fgCalls)gpuTimer_.submitted(ring_.lastSignaledValue());
+                if(previewCheckpoint&&!reset)previewCheckpoint();
+                ++out.fgEvaluated;out.hasGenerated=true;out.genSlot=parity;out.fgPredict=true;
+                out.genFenceValue=ring_.lastSignaledValue();out.genFenceObject=context_.fence();out.generatedPtsMs=ptsMs+(ptsMs-prevPtsMs_)*0.5;
+                ++metrics_.fgSubmittedCandidates;
+                BatchFrame f;f.identity=out.batch.identity;f.kind=FrameKind::Generated;f.validity=GenerationValidity::Pending;f.subframe=sub;
+                f.pts100ns=pushflow::predict::pts(out.batch.a100ns,out.batch.b100ns,sub,outputMultiplier);
+                f.lease=std::make_shared<FrameLease>();f.lease->texture=genFrame_[generatedSlot];f.lease->slot=generatedSlot;
+                f.lease->readyFence=out.genFenceValue;f.lease->readyFenceObject=out.genFenceObject;generatedLeases_[generatedSlot]=f.lease;
+                // The real frame goes into the batch first (below); the forecasts follow it.
+                if(f.pts100ns>out.batch.b100ns&&afterRealCount<afterReal.size())afterReal[afterRealCount++]=std::move(f);
+                continue;
+            }
             auto* plist=ring_.acquireNext(slot,st);if(!plist)return false;
             if(sub==1){gpuTimer_.mark(plist,GpuStage::FgBatch);gpuTimer_.mark(plist,GpuStage::Fg1);}
             tracker_.transition(plist,videoFrame_[1-parity].Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             tracker_.transition(plist,videoFrame_[parity].Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             // The pair is packed once; later subframes only rewrite the time plane.
-            if(!pushFlow_->pack(plist,videoFrame_[1-parity].Get(),videoFrame_[parity].Get(),float(sub)/float(outputMultiplier),sub>1)){failedBackend_=engine::FailedBackend::Fg;return false;}
+            // The two real frames' numbers (this graph's own count, from 1) let the encoder cache keep the
+            // second frame's features for the pair after this one, where it is the first.
+            if(!pushFlow_->pack(plist,videoFrame_[1-parity].Get(),videoFrame_[parity].Get(),float(sub)/float(outputMultiplier),sub>1,realFrameIndex_,realFrameIndex_+1)){failedBackend_=engine::FailedBackend::Fg;return false;}
             tracker_.transition(plist,videoFrame_[1-parity].Get(),D3D12_RESOURCE_STATE_COMMON);
             tracker_.transition(plist,videoFrame_[parity].Get(),D3D12_RESOURCE_STATE_COMMON);
             if(!submitGraph(slot))return false;
@@ -4295,6 +4349,7 @@ bool EnhanceGraph::process(const AVFrame* frame, double ptsMs, bool reset, Frame
     out.realFrameIndex = realFrameIndex_;
     out.videoSlot = parity;
     BatchFrame real;real.identity=out.batch.identity;real.pts100ns=out.batch.b100ns;real.lease=std::make_shared<FrameLease>();real.lease->texture=exclusionVideo_[parity]?exclusionVideo_[parity]:videoFrame_[parity];real.lease->sourceReference=sourceReferences_[parity];real.lease->baseReference=baseReferences_[parity];real.lease->slot=parity;real.lease->readyFence=out.videoFenceValue;real.lease->readyFenceObject=out.videoFenceObject;real.lease->referencesValid=retainReferences;realLeases_[parity]=real.lease;out.batch.append(std::move(real));
+    for(uint32_t i=0;i<afterRealCount;++i)out.batch.append(std::move(afterReal[i]));
     if(veyra::log::verboseFrameLogs())veyra::log::info("frame-batch",std::format("batch={} epoch={} revision={} source={} a={} b={} count={} realSlot={} realFence={} genSlot={} genFence={}",out.batch.batchId,epoch_,out.batch.identity.settingsRevision,out.batch.identity.sourceFrameId,out.batch.a100ns,out.batch.b100ns,out.batch.count,parity,out.videoFenceValue,out.genSlot,out.genFenceValue));
     if(pausedEligible&&lastAppliedSettings_){
         pausedNrCacheValid_=true;pausedNrFrame_=frame;pausedNrSourceId_=sourceFrameId;pausedNrPts_=ptsMs;

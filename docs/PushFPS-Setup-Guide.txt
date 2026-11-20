@@ -1,5 +1,5 @@
-PushFPS 3.1 setup guide: the best settings to start from
-==========================================================
+PushFPS setup guide: the best settings to start from
+====================================================
 
 PushFPS is built on Veyra by Likely7. This guide is also on the website:
 https://dosukasol.github.io/PushFPS/#guide
@@ -26,7 +26,8 @@ set these in the Quick setup (Home or Pro mode):
                            (per refresh rate: "Which target for your monitor" below)
   Game preset ............ pick the game if it is listed (GTA VI has one): it sets the HUD boxes
   Smooth frame pacing .... ON (default): every generated frame is shown once
-  Frame Pacing Repair .... ON: evens out uneven 30 FPS games before frames are generated
+  Frame Pacing Repair .... OFF (default). Turn it on only if a game locked at 30 or 40 FPS still
+                           judders: it evens out uneven frame delivery before frames are generated
   Live HUD Lock .......... ON: keeps text, crosshairs and the minimap sharp
   Adaptive multiplier .... ON for games that dip below their frame rate
   AI picture enhancement . OFF to start (it uses a lot of GPU). Turn it on later if you have headroom
@@ -42,6 +43,7 @@ Which target for your monitor
 
   Monitor      30 FPS game (GTA VI)            60 FPS game                  Good to know
   60 Hz        60 (2x)                         Off                          Use Lowest latency only
+  90 Hz        90 (3x)                         Off                          Offered in place of 120 on a 90 Hz screen
   75/100 Hz    60 (2x)                         Off                          G-SYNC/FreeSync on, or Windows at 60 Hz
   120 Hz       120 (4x)                        120 (2x)                     The sweet spot for console games
   144/165 Hz   120 (4x)                        120 (2x)                     G-SYNC/FreeSync on, or Windows at 120 Hz
@@ -77,7 +79,9 @@ Change one thing at a time, play a minute, then decide.
                                               Medium to start, High at 2x if your card keeps up (section 4)
   Soft or blocky picture                      RTX Video Super Resolution at Medium (the default) on
                                               NVIDIA, NVIDIA Image Scaling on any card, or AI picture
-                                              enhancement (RTX 40/50)
+                                              enhancement (NVIDIA RTX, Radeon RX 7000/9000; needs the
+                                              installer's experimental extras: run Install-PushFPS.cmd
+                                              again and answer y when it asks)
   Frame rate drops with AI enhancement on     AI enhancement off, or a lower target
   Washed-out or too dark picture              Match the colour settings in the capture dialog to the
                                               console: HDR or SDR, Limited or Full range
@@ -179,8 +183,9 @@ Which capture card
                  KUHAIMI G50. Plug into a real 10 Gbps port (USB 3.2 Gen 2) on the PC: on 5 Gbps
                  they capture less.
   PCIe ......... 4K60 HDR. AVerMedia GC573, Elgato 4K Pro
-  Tested with PushFPS: Elgato 4K X, HD60 X and 4K S. The other models are Veyra's developer's picks
-  and are not tested with PushFPS yet. Any card that shows up as a camera in Windows works.
+  Tested with PushFPS: Elgato 4K X, HD60 X and 4K S. Reported working by users: Elgato HD60 S and
+  AVerMedia Live Gamer Ultra 2.1 (GC553G2). The other models are Veyra's developer's picks and are
+  not tested with PushFPS yet. Any card that shows up as a camera in Windows works.
 
 NVIDIA Video Frame Generation: Medium or High?
   For 30 FPS games it gives the least ghosting and wobble of the methods (RTX 40/50; RTX 30
@@ -258,12 +263,13 @@ Tips
   [ ] Console at 60 Hz (120 Hz only if your capture card captures 120 Hz), VRR off
   [ ] Capture card on a USB 3 port directly on the PC, 60 FPS (or 120), NV12 or P010, not MJPEG
   [ ] Quick setup: console, game frame rate 30, target from the monitor table (60 or 120), game preset
-  [ ] Smooth frame pacing, Frame Pacing Repair and Live HUD Lock on
+  [ ] Smooth frame pacing and Live HUD Lock on (Frame Pacing Repair only if a locked game judders)
   [ ] Optimise for my PC with the game on screen
   [ ] Lowest latency on for action games
   [ ] G-SYNC/FreeSync on, monitor at its highest refresh rate, fullscreen (F11)
   [ ] HDR only when every step is HDR; SDR for streams and shared clips
 
 Problems? In PushFPS: Settings > Report a problem copies diagnostic information.
+Questions? Ask on the PushFPS Discord: https://discord.gg/N88znNpSgC
 Website: https://dosukasol.github.io/PushFPS/    Source: https://github.com/DosukaSOL/PushFPS
 PushFPS is free software under the GNU GPL-3.0, a modified version of Veyra by Likely7.

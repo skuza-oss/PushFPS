@@ -66,7 +66,14 @@ struct RecordingSettings {
     // PushFPS before/after comparison clip (RecordingCompare.h): left half the
     // console's real frames, right half every presented frame. Recordings only.
     bool compare=false;
-    CompareLayout compareLayout=CompareLayout::Split; // split picture, or both pictures side by side
+    CompareLayout compareLayout=CompareLayout::Split; // split, side by side, vertical or reveal
+    // Split and Reveal clips: the highest the clip is recorded (1080, 1440 or 2160; a larger
+    // picture is scaled down, a smaller one never enlarged). 0: automatic, at most 1440, with the
+    // standard bitrate, as every such clip was before 3.2.5. A chosen height also asks for the
+    // best-looking encode (compareClipBitrateMbps, compareClipPreset in RecordingComparePlan.h).
+    // Side by side and Vertical ignore it.
+    uint32_t compareMaxHeight=0;
+    double compareRevealSeconds=3.0;  // Reveal: a sweep starts every so many seconds (compareRevealInterval)
     RecordingLabelRenderer compareLabels; // optional labels, called per file on the engine thread
     // Instant replay recorder only.
     uint32_t replaySeconds=60;   // how much the buffer keeps

@@ -5,9 +5,11 @@
 //  - the crash notice: after PushFPS stopped unexpectedly, the next start says so and offers a
 //    summary to copy that holds nothing personal (engine/PushCrashNote.h);
 //  - the graphics card test: PushFlowBench.exe (shipped beside PushFPS.exe) run in its own process,
-//    with a result the user can copy.
+//    with a result the user can copy;
+//  - the performance report: what the session playing now really does (engine/PushPerfReport.h).
 #include "../QmlPlayerBridge_p.h"
 #include "veyra/engine/PushCrashNote.h"
+#include "veyra/engine/PushPerfReport.h"
 #include "veyra/gfx/D3D12DeviceContext.h"
 #include <QCoreApplication>
 #include <QDir>
@@ -107,6 +109,68 @@ QVariantMap QmlPlayerBridge::pushCrashReport() const {
     return QVariantMap{{QStringLiteral("present"), false}};
 }
 void QmlPlayerBridge::pushDismissCrashReport() { impl_->pushCrashReport.clear(); }
+
+// --- performance report ------------------------------------------------------------
+// The session playing now, as text to copy into a bug report or a hardware report: the card and its
+// driver, the settings that matter, and the frames really presented a second (the game's own and the
+// generated ones) with PushFPS's own software delay. Numbers and words from fixed lists only
+// (engine/PushPerfReport.h): no device name, file, folder, address or account can be in it.
+QString QmlPlayerBridge::pushPerformanceReport() const {
+    const auto& s = impl_->snapshot;
+    const auto& flow = s.metrics.flow;
+    engine::perfreport::Facts f;
+    f.version = version().toStdString();
+    f.windows = QSysInfo::kernelVersion().toStdString();
+    if (const auto* adapter = engineAdapterDesc()) {
+        f.gpu = QString::fromWCharArray(adapter->Description).toStdString();
+        f.gpuMemoryMb = uint64_t(adapter->DedicatedVideoMemory) >> 20;
+        f.driver = engineAdapterDriverVersion().toStdString();
+    } else f.softwareRenderer = true;   // no hardware adapter: Windows' software renderer
+    f.displayHz = impl_->displayRefreshHz;
+    f.vrrState = vrrState();
+    f.playing = s.running && !s.image && hasSource();
+    f.source = hasSource() ? sourceKind().toStdString() : std::string();
+    f.sourceWidth = uint32_t(s.sourceWidth); f.sourceHeight = uint32_t(s.sourceHeight);
+    f.outputWidth = uint32_t(std::max(0, int(s.metrics.resolution.output.width)));
+    f.outputHeight = uint32_t(std::max(0, int(s.metrics.resolution.output.height)));
+    f.hdr = s.sourceHdr;
+    if (s.capture) { f.captureFps = s.captureFps; f.captureReceived = s.captureReceived; f.captureDropped = s.captureDropped; }
+    f.contentFps = s.contentFps;
+    f.fgOn = fgEnabled();
+    if (f.fgOn) {
+        const QString backend = fgBackendName();
+        f.fgMethod = backend.toStdString();
+        if (backend == QLatin1String("pushflow") || backend == QLatin1String("vfg")) f.fgTier = vfgQuality() == 0 ? "fast" : vfgQuality() == 2 ? "quality" : "balanced";
+        f.multiplier = uint32_t(std::max(1, fgMultiplier()));
+        f.multiplierNow = s.previewFgMultiplier;
+    }
+    f.adaptive = fgAdaptive(); f.pacingRepair = pacingRepair(); f.hudLock = hudLock();
+    f.contentRate = contentRate();
+    f.aiEnhancement = nrAnyEnabled(); f.upscaling = srEnabled();
+    f.fgActive = s.fgActive; f.budgetLimited = s.fgBudgetLimited; f.fgHealth = impl_->fgIdle;
+    f.ratesReady = flow.rateWindowReady;
+    f.realFps = flow.realPresentFps; f.generatedFps = flow.generatedPresentFps;
+    f.presentedFps = s.submissionFps; f.low1Fps = s.submissionLow1Fps;
+    f.latencyMs = flow.softwareLatencyMs; f.latencyP95Ms = flow.softwareLatencyP95Ms; f.latencySamples = flow.latencySamples;
+    if (gpuUtilizationKnown()) f.gpuPercent = gpuUtilization();
+    f.pushFlowP50Ms = s.pushFlowP50Ms; f.pushFlowP95Ms = s.pushFlowP95Ms; f.pushFlowPrecision = s.pushFlowPrecision;
+    f.pushFlowMotionWidth = s.pushFlowMotionWidth; f.pushFlowMotionHeight = s.pushFlowMotionHeight;
+    f.pushFlowEncoderCache = s.pushFlowEncoderCache; f.pushFlowWholeMs = s.pushFlowWholeMs; f.pushFlowSplitMs = s.pushFlowSplitMs;
+    f.pushFlowGuard = s.pushFlowGuard; f.pushFlowGuardFrames = s.pushFlowGuardFrames; f.pushFlowGuardMended = s.pushFlowGuardMended; f.pushFlowGuardHeld = s.pushFlowGuardHeld;
+    f.pushFlowPredict = s.pushFlowPredict; f.pushFlowPredictFrames = s.pushFlowPredictFrames; f.pushFlowPredictSuperseded = s.pushFlowPredictSuperseded;
+    f.pushFlowPredictCounted = s.pushFlowPredictCounted; f.pushFlowPredictMoving = s.pushFlowPredictMoving; f.pushFlowPredictHeld = s.pushFlowPredictHeld;
+    return QString::fromStdString(engine::perfreport::json(f));
+}
+
+bool QmlPlayerBridge::pushCopyPerformanceReport() {
+    const QString report = pushPerformanceReport();
+    if (!pushCopyText(report)) { emit notice(tr("无法复制到剪贴板"), true); return false; }
+    const bool playing = impl_->snapshot.running && !impl_->snapshot.image && hasSource();
+    veyra::log::info("push-report", std::format("performance report copied playing={} bytes={}", playing, report.size()));
+    emit notice(playing ? tr("性能报告已复制：可以直接粘贴到反馈或硬件报告里，里面没有任何个人信息")
+                        : tr("性能报告已复制。现在没有画面在播放，所以只有显卡和设置；播放时再复制才有实际帧率"), false);
+    return true;
+}
 
 // --- graphics card test ------------------------------------------------------------
 // PushFlow's speed depends on the graphics card, and everything PushFPS knows about it so far comes
