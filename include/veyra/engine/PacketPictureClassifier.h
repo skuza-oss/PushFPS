@@ -49,7 +49,10 @@ public:
         const double size = std::max<double>(bytes, 16);
         if (count_ >= 1 && !prevRepeat_ && last_ != 0) {
             r.threshold = prev_ / ratio_;
-            if (size < r.threshold) {
+            // A still screen (a paused map: 0.13 Mbit/s, about 270 bytes per sample) codes new pictures and
+            // repeats alike as near-empty frames; at 1 KB or less there is nothing new to show either way.
+            if (size <= kStill) r.repeat = true;
+            else if (size < r.threshold) {
                 const bool big = size < prev_ / bigRatio_;
                 const bool rhythm = count_ >= 2 && (prev2Repeat_ || prev2_ < r.threshold);
                 r.repeat = big || rhythm;
@@ -79,6 +82,7 @@ private:
         out[i] = 0; return true;
 #endif
     }
+    static constexpr double kStill = 1024;
     bool enabled_ = true;
     double ratio_ = 1.3, bigRatio_ = 2.5;
     double prev_ = 0, prev2_ = 0;
