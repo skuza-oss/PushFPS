@@ -1377,6 +1377,7 @@ if(VEYRA_BUILD_QML_UI AND Qt6_FOUND)
     src/ui/bridge/Chain.cpp
     src/ui/bridge/Recording.cpp
     src/ui/bridge/View.cpp
+    src/ui/Ps5KeyboardMouse.cpp include/veyra/ui/Ps5KeyboardMouse.h include/veyra/remoteplay/KeyboardMouseMap.h
     src/ui/QmlPlayerBridge_p.h)
   set_target_properties(veyra_qml_bridge PROPERTIES AUTOMOC ON)
   # Interface language (UiLanguage.h): its own small library so the streaming models,

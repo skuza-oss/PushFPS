@@ -458,6 +458,13 @@ bool QmlPlayerBridge::ps5Connect() {
         // Started with the session: the poll stops the pad when no session runs.
         if (!viewOnly) {
             if (!i.acquirePad(Impl::PadPs5)) veyra::log::warn("remoteplay-input", "SDL gamepad initialization failed");
+            if (!i.ps5Kbm) {
+                i.ps5Kbm = std::make_unique<ui::Ps5KeyboardMouse>(QCoreApplication::applicationDirPath() + "/runtime_local/keyboard-mouse.ini");
+                i.ps5Kbm->onCapturedChanged = [this](bool on) {
+                    emit notice(on ? tr("Keyboard and mouse control the PS5. F12 or Home gives them back.")
+                                   : tr("Keyboard and mouse released. F12 takes them again."), false);
+                };
+            }
             if (!i.controllerTimer) {
                 i.controllerTimer = new QTimer(this);
                 connect(i.controllerTimer, &QTimer::timeout, this, [this] {
@@ -467,9 +474,13 @@ bool QmlPlayerBridge::ps5Connect() {
                         const bool focused = QGuiApplication::focusWindow() != nullptr;
                         // PushFPS latency test: its own presses go out instead of the pad.
                         if (j.latency.active) { j.engine.remotePlayController(pushLatencyPress()); return; }
-                        j.engine.remotePlayController(j.controller.poll(focused));
+                        // PushFPS: keyboard and mouse (F12) on top of any pad.
+                        if (j.ps5Kbm) j.ps5Kbm->setActive(GetAncestor(j.videoWindow, GA_ROOT), true);
+                        const auto kbm = j.ps5Kbm ? j.ps5Kbm->poll() : remoteplay::ControllerState{};
+                        j.engine.remotePlayController(remoteplay::KeyboardMouseMap::merge(j.controller.poll(focused), kbm));
                         j.controller.feedback(j.engine.remotePlayFeedback(), focused);
                     } else {
+                        if (j.ps5Kbm) j.ps5Kbm->setActive(nullptr, false);
                         j.engine.remotePlayController({}); j.releasePad(Impl::PadPs5); j.controllerTimer->stop();
                     }
                 });
@@ -478,6 +489,7 @@ bool QmlPlayerBridge::ps5Connect() {
         } else {
             if (i.controllerTimer) i.controllerTimer->stop();
             i.releasePad(Impl::PadPs5);
+            if (i.ps5Kbm) i.ps5Kbm->setActive(nullptr, false);
         }
     });
     i.ps5Watching = true;

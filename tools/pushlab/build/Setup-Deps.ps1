@@ -80,14 +80,27 @@ Step 'Streaming dependencies (static)'
     openssl opus json-c libevent miniupnpc protobuf sdl3 "libdatachannel[srtp,ws]" nlohmann-json pkgconf zlib --clean-after-build "--x-buildtrees-root=$env:VCPKG_BUILDTREES_ROOT"; Check
 
 Step 'Streaming sources (Chiaki-ng with patches, moonlight-common-c)'
+# All reviewed patches, in name order (as CI); the stage is rebuilt whenever the set or their content changes.
+$patches = @(Get-ChildItem "$src\scripts\remoteplay\patches\*.patch" | Sort-Object Name)
+$patchStamp = "$deps\chiaki-stage.patches"
+$wantStamp = ($patches | ForEach-Object { "$($_.Name) $((Get-FileHash $_.FullName).Hash)" }) -join ';'
+$haveStamp = if (Test-Path $patchStamp) { (Get-Content $patchStamp -Raw).Trim() } else { '' }
+if ((Test-Path "$deps\chiaki-stage") -and $haveStamp -ne $wantStamp) {
+    git -C chiaki-clean worktree remove --force "$deps\chiaki-stage" 2>$null
+    Remove-Item "$deps\chiaki-stage" -Recurse -Force -ErrorAction SilentlyContinue
+    git -C chiaki-clean worktree prune
+}
 if (-not (Test-Path "$deps\chiaki-stage\CMakeLists.txt")) {
-    Remove-Item "$deps\chiaki-clean", "$deps\chiaki-stage" -Recurse -Force -ErrorAction SilentlyContinue
-    git -c core.autocrlf=false clone -q https://github.com/streetpea/chiaki-ng.git chiaki-clean; Check
-    git -C chiaki-clean -c advice.detachedHead=false checkout -q $CHIAKI_COMMIT; Check
-    git -C chiaki-clean -c core.autocrlf=false submodule update -q --init --recursive; Check
+    if (-not (Test-Path "$deps\chiaki-clean\CMakeLists.txt")) {
+        Remove-Item "$deps\chiaki-clean" -Recurse -Force -ErrorAction SilentlyContinue
+        git -c core.autocrlf=false clone -q https://github.com/streetpea/chiaki-ng.git chiaki-clean; Check
+        git -C chiaki-clean -c advice.detachedHead=false checkout -q $CHIAKI_COMMIT; Check
+        git -C chiaki-clean -c core.autocrlf=false submodule update -q --init --recursive; Check
+    }
     git -C chiaki-clean worktree add -q --detach "$deps\chiaki-stage" $CHIAKI_COMMIT; Check
     git -C chiaki-stage -c core.autocrlf=false submodule update -q --init --recursive; Check
-    foreach ($p in '0001-chiaki-msvc-vla-compat.patch', '0002-chiaki-video-metadata.patch') { git -C chiaki-stage apply "$src\scripts\remoteplay\patches\$p"; Check }
+    foreach ($p in $patches) { git -C chiaki-stage apply $p.FullName; Check }
+    Set-Content $patchStamp $wantStamp
 }
 & "$deps\venv\Scripts\python.exe" "$src\scripts\remoteplay\verify-chiaki-stage.py" --stage "$deps\chiaki-stage" --clean "$deps\chiaki-clean"; Check
 if (-not (Test-Path "$deps\moonlight-common-c\CMakeLists.txt")) {

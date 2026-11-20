@@ -95,6 +95,7 @@ class QProcess;
 #include "veyra/remoteplay/ProfileStore.h"
 #include "veyra/source/RemotePlaySource.h"
 #endif
+#include "veyra/ui/Ps5KeyboardMouse.h"
 #ifdef VEYRA_ENABLE_XBOX
 #include "veyra/ui/XboxModel.h"
 #endif
@@ -299,6 +300,8 @@ struct QmlPlayerBridge::Impl {
 
     // The window the engine presents into, and the last file the UI opened.
     HWND videoWindow = nullptr;
+    // PushFPS: keyboard and mouse as the PS5 controller (F12), made with the first PS5 stream.
+    std::unique_ptr<ui::Ps5KeyboardMouse> ps5Kbm;
     std::wstring sourceLabel;
     int thumbnailGeneration = 0;
     // The live source kind and label ("" for a file), for the page headers.
